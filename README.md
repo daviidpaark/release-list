@@ -38,18 +38,18 @@ Inspired by [jakubito/spotify-release-list](https://github.com/jakubito/spotify-
   - Click any card or title to jump directly to the album page.
   - Click any artist name to navigate to their artist page.
 - **Dual Display Modes**:
-  - **Grid View (⊞)**: Responsive art cards that dynamically scale from ultra-wide displays down to compact split windows.
-  - **Dense List View (☰)**: Compact horizontal rows for scanning large numbers of releases quickly.
+  - **Grid View**: Responsive art cards that dynamically scale from ultra-wide displays down to compact split windows.
+  - **Dense List View**: Compact horizontal rows for scanning large numbers of releases quickly.
 
 ---
 
 ## Local Caching & API Rate-Limit Protection
 
-Release List is engineered to be extremely polite to Spotify's APIs:
+Release List is designed to minimize Spotify API traffic:
 
 1. **Persistent Local Caching (0ms Load Times)**:
    - All catalog data is stored locally in native IndexedDB (`ReleaseListDB`) with memory-tier caching.
-   - Opening Spotify or switching to Release List loads the feed **instantly in 0ms** without sending any network requests.
+   - Opening Spotify or switching to Release List loads cached results without sending new network requests.
 2. **Rate-Limit & Overload Avoidance**:
    - Background catalog synchronization runs through a throttled concurrency worker pool (limited to **3 concurrent requests** with a **60ms pacing delay** between requests).
    - Prevents hitting HTTP `429 Too Many Requests` limits.
@@ -70,7 +70,7 @@ Click the **⚙ Settings** button in the top bar to access:
 
 ---
 
-## Installation
+## Install
 
 ### Requirements
 - [Spicetify](https://spicetify.app) installed and configured (`spicetify backup` run at least once)
@@ -98,7 +98,7 @@ curl -fsSL "https://raw.githubusercontent.com/daviidpaark/release-list/main/inst
 
 ---
 
-## Uninstallation
+## Uninstall
 
 ### Windows (PowerShell)
 ```powershell
@@ -109,6 +109,19 @@ iwr -useb "https://raw.githubusercontent.com/daviidpaark/release-list/main/unins
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/daviidpaark/release-list/main/uninstall.sh" | bash
 ```
+
+---
+
+## Disclaimer
+
+This project is an independent, open-source custom app and is not affiliated with, sponsored by, or endorsed by Spotify. Spotify is a registered trademark of Spotify AB.
+
+---
+
+## AI Disclosure & Personal Project Note
+
+> [!NOTE]
+> This project was developed as a personal project with the assistance of **GitHub Copilot (Claude Sonnet / Opus)** and **Google Antigravity (Gemini Flash / Pro)** AI pair programming. It is shared publicly for the benefit of the community and other Spotify and Spicetify users. Contributions, feedback, and issue reports are always welcome!
 
 ---
 

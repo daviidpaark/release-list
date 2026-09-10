@@ -278,11 +278,11 @@ if (typeof document !== "undefined" && !document.getElementById("release-list-st
       gap: 6px;
       padding: 6px 14px;
       border-radius: 9999px;
-      font-size: 13px;
-      font-weight: 600;
+      font-size: 12px;
+      font-weight: 700;
       cursor: pointer;
       transition: all 0.18s ease;
-      background: rgba(255, 255, 255, 0.07);
+      background: rgba(255, 255, 255, 0.08);
       border: 1px solid rgba(255, 255, 255, 0.1);
       color: rgba(255, 255, 255, 0.8);
       user-select: none;
@@ -1976,12 +1976,12 @@ function ReleaseListApp() {
             onChange: (e) => setSearchQuery(e.target.value),
             style: {
               width: "100%",
-              padding: "10px 14px 10px 38px",
-              background: "rgba(255, 255, 255, 0.06)",
+              padding: "8px 16px 8px 34px",
+              background: "rgba(255, 255, 255, 0.07)",
               border: "1px solid rgba(255, 255, 255, 0.12)",
-              borderRadius: 8,
+              borderRadius: "500px",
               color: "#ffffff",
-              fontSize: 14,
+              fontSize: 13,
               outline: "none",
               boxSizing: "border-box",
             },
