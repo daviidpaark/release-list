@@ -583,6 +583,30 @@ async function saveCachedCatalog(catalogObj) {
 async function clearCachedCatalog() {
   inMemoryCatalog = null;
   inMemorySavedUris = null;
+  cachedSearchQuery = null;
+  cachedOnlySaved = null;
+  cachedActiveTypes = null;
+  cachedDateRangeDays = null;
+  cachedCustomStartDate = null;
+  cachedCustomEndDate = null;
+  cachedLayoutMode = null;
+  cachedSortOrder = null;
+  cachedVisibleCount = INITIAL_BATCH_SIZE;
+  cachedScrollTop = 0;
+  if (typeof STORAGE_KEYS !== "undefined") {
+    [
+      STORAGE_KEYS.SEARCH_QUERY,
+      STORAGE_KEYS.ONLY_SAVED,
+      STORAGE_KEYS.ACTIVE_TYPES,
+      STORAGE_KEYS.DATE_RANGE,
+      STORAGE_KEYS.CUSTOM_START_DATE,
+      STORAGE_KEYS.CUSTOM_END_DATE,
+      STORAGE_KEYS.LAYOUT_MODE,
+      STORAGE_KEYS.SORT_ORDER,
+    ].forEach((k) => {
+      if (k) removeSessionItem(k);
+    });
+  }
   // Completely delete the physical database from disk on cache clear
   await deleteDB();
   try {
@@ -686,6 +710,14 @@ async function toggleSaveAlbum(uri, currentlySaved) {
 // ---------------------------------------------------------------------------
 const STORAGE_KEYS = {
   SETTINGS: "release-list:settings",
+  SEARCH_QUERY: "release-list:search-query",
+  ONLY_SAVED: "release-list:only-saved",
+  ACTIVE_TYPES: "release-list:active-types",
+  DATE_RANGE: "release-list:date-range",
+  CUSTOM_START_DATE: "release-list:custom-start-date",
+  CUSTOM_END_DATE: "release-list:custom-end-date",
+  LAYOUT_MODE: "release-list:layout-mode",
+  SORT_ORDER: "release-list:sort-order",
 };
 
 const DAY_MS = 86400000;
@@ -757,8 +789,32 @@ function formatDate(dateObj, locale = "en-US") {
   }).format(dateObj);
 }
 
-function getDayHeader(timeMs, now = Date.now()) {
-  const target = new Date(timeMs);
+function parseReleaseDate(dateStr) {
+  if (!dateStr || typeof dateStr !== "string") return { time: 0, dateStr: "" };
+  const clean = dateStr.split("T")[0].trim();
+  const parts = clean.split("-").map(Number);
+  const year = parts[0];
+  const month = parts[1] != null && !isNaN(parts[1]) ? parts[1] - 1 : 0;
+  const day = parts[2] != null && !isNaN(parts[2]) ? parts[2] : 1;
+
+  if (isNaN(year) || year <= 0) return { time: 0, dateStr: clean };
+
+  // Midday local time (12:00:00) avoids UTC midnight timezone regressions and DST boundary shifts
+  const localDate = new Date(year, month, day, 12, 0, 0);
+  return {
+    time: localDate.getTime(),
+    dateStr: clean,
+  };
+}
+
+function getDayHeader(timeMs, now = Date.now(), dateStr = "") {
+  let target;
+  if (dateStr) {
+    const parsed = parseReleaseDate(dateStr);
+    target = new Date(parsed.time || timeMs);
+  } else {
+    target = new Date(timeMs);
+  }
   const nowDate = new Date(now);
 
   const targetDayStart = new Date(target.getFullYear(), target.getMonth(), target.getDate()).getTime();
@@ -816,41 +872,62 @@ async function fetchFollowedArtists() {
   }
 }
 
-async function fetchArtistReleasesGraphQL(artistUri, limit = 50) {
-  try {
-    const { data, errors } = await Spicetify.GraphQL.Request(
-      {
-        name: "queryArtistDiscographyAll",
-        operation: "query",
-        sha256Hash: "9380995a9d4663cbcb5113fef3c6aabf70ae6d407ba61793fd01e2a1dd6929b0",
-        value: null,
-      },
-      {
-        uri: artistUri,
-        offset: 0,
-        limit,
+async function fetchArtistReleasesGraphQL(artistUri, limit = 50, retries = 2) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const { data, errors } = await Spicetify.GraphQL.Request(
+        {
+          name: "queryArtistDiscographyAll",
+          operation: "query",
+          sha256Hash: "9380995a9d4663cbcb5113fef3c6aabf70ae6d407ba61793fd01e2a1dd6929b0",
+          value: null,
+        },
+        {
+          uri: artistUri,
+          offset: 0,
+          limit,
+        }
+      );
+      if (errors) {
+        const isRateLimit = errors.some(
+          (e) => String(e?.message || "").includes("429") || String(e?.extensions?.code || "").includes("429")
+        );
+        if (isRateLimit && attempt < retries) {
+          await new Promise((r) => setTimeout(r, (attempt + 1) * 1200));
+          continue;
+        }
+        console.warn("[ReleaseList] GraphQL errors for artist", artistUri, errors);
+        return null;
       }
-    );
-    if (errors) {
-      console.warn("[ReleaseList] GraphQL errors for artist", artistUri, errors);
-      return [];
+      const allGroups = data?.artistUnion?.discography?.all?.items || [];
+      return allGroups.flatMap((group) => group.releases?.items || []);
+    } catch (e) {
+      const errStr = String(e || "");
+      const isRateLimit =
+        errStr.includes("429") ||
+        errStr.toLowerCase().includes("rate limit") ||
+        errStr.toLowerCase().includes("too many requests");
+      if (attempt < retries) {
+        const delay = isRateLimit ? (attempt + 1) * 1500 : (attempt + 1) * 600;
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+      console.warn("[ReleaseList] Fetch artist discography error:", e);
+      return null;
     }
-    const allGroups = data?.artistUnion?.discography?.all?.items || [];
-    return allGroups.flatMap((group) => group.releases?.items || []);
-  } catch (e) {
-    console.warn("[ReleaseList] Fetch artist discography error:", e);
-    return [];
   }
+  return null;
 }
 
-// Controlled concurrency pool (3 workers, 60ms delay) to guarantee zero 429 errors
-async function runConcurrentPool(items, concurrencyLimit, fn, onProgress, pacingDelayMs = 60) {
+// Controlled concurrency pool (3 workers, 80ms delay) with abort capability
+async function runConcurrentPool(items, concurrencyLimit, fn, onProgress, pacingDelayMs = 80, shouldAbort = () => false) {
   const results = [];
   let index = 0;
   let finished = 0;
 
   const workers = new Array(concurrencyLimit).fill(0).map(async () => {
     while (index < items.length) {
+      if (shouldAbort()) break;
       const curIndex = index++;
       try {
         const res = await fn(items[curIndex], curIndex);
@@ -859,8 +936,8 @@ async function runConcurrentPool(items, concurrencyLimit, fn, onProgress, pacing
         results[curIndex] = null;
       } finally {
         finished++;
-        if (onProgress) onProgress(finished, items.length);
-        if (pacingDelayMs > 0) {
+        if (onProgress && !shouldAbort()) onProgress(finished, items.length);
+        if (pacingDelayMs > 0 && !shouldAbort()) {
           await new Promise((r) => setTimeout(r, pacingDelayMs));
         }
       }
@@ -1290,6 +1367,87 @@ function createSearchMatcher(rawQuery) {
 }
 
 // ---------------------------------------------------------------------------
+// Module-level caches for search, filters, pagination, and scroll persistence across navigation
+// ---------------------------------------------------------------------------
+let cachedSearchQuery = null;
+let cachedOnlySaved = null;
+let cachedActiveTypes = null;
+let cachedDateRangeDays = null;
+let cachedCustomStartDate = null;
+let cachedCustomEndDate = null;
+let cachedLayoutMode = null;
+let cachedSortOrder = null;
+let cachedVisibleCount = INITIAL_BATCH_SIZE;
+let cachedScrollTop = 0;
+let lastBgSyncTimestamp = 0;
+
+function getSessionItem(key, fallback = "") {
+  try {
+    if (typeof Spicetify !== "undefined" && Spicetify.LocalStorage?.get) {
+      const val = Spicetify.LocalStorage.get(key);
+      return val !== null && val !== undefined ? val : fallback;
+    }
+    if (typeof localStorage !== "undefined") {
+      const val = localStorage.getItem(key);
+      return val !== null && val !== undefined ? val : fallback;
+    }
+  } catch {}
+  return fallback;
+}
+
+function setSessionItem(key, val) {
+  try {
+    if (val === null || val === undefined) {
+      removeSessionItem(key);
+      return;
+    }
+    if (typeof Spicetify !== "undefined" && Spicetify.LocalStorage?.set) {
+      Spicetify.LocalStorage.set(key, String(val));
+      return;
+    }
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(key, String(val));
+    }
+  } catch {}
+}
+
+function removeSessionItem(key) {
+  try {
+    if (typeof Spicetify !== "undefined" && Spicetify.LocalStorage?.remove) {
+      Spicetify.LocalStorage.remove(key);
+      return;
+    }
+    if (typeof localStorage !== "undefined") {
+      localStorage.removeItem(key);
+    }
+  } catch {}
+}
+
+function getSpotifyScrollContainer() {
+  if (typeof document === "undefined") return null;
+  const selectors = [
+    ".main-view-container__scroll-node [data-overlayscrollbars-viewport]",
+    ".main-view-container__scroll-node .os-viewport",
+    "[data-overlayscrollbars-viewport]",
+    ".os-viewport",
+    ".main-view-container__scroll-node",
+    ".main-view-container",
+    "main",
+  ];
+  for (const s of selectors) {
+    const el = document.querySelector(s);
+    if (el && (el.scrollHeight > el.clientHeight || el.scrollTop > 0)) {
+      return el;
+    }
+  }
+  for (const s of selectors) {
+    const el = document.querySelector(s);
+    if (el) return el;
+  }
+  return document.scrollingElement || document.documentElement || window;
+}
+
+// ---------------------------------------------------------------------------
 // 5. Main Application Component
 // ---------------------------------------------------------------------------
 function ReleaseListApp() {
@@ -1320,23 +1478,182 @@ function ReleaseListApp() {
   }));
   const [isCached, setIsCached] = useState(() => Boolean(inMemoryCatalog?.items?.length));
 
-  // Active Filters State
-  const [searchQuery, setSearchQuery] = useState("");
-  const [onlySaved, setOnlySaved] = useState(false);
+  // Active Filters State (Persisted across navigation and app restarts)
+  const [searchQuery, setSearchQuery] = useState(() => {
+    if (cachedSearchQuery !== null) return cachedSearchQuery;
+    return getSessionItem(STORAGE_KEYS.SEARCH_QUERY, "");
+  });
+
+  const [onlySaved, setOnlySaved] = useState(() => {
+    if (cachedOnlySaved !== null) return cachedOnlySaved;
+    return getSessionItem(STORAGE_KEYS.ONLY_SAVED, "false") === "true";
+  });
+
   const [savedAlbumUris, setSavedAlbumUris] = useState(() => inMemorySavedUris || new Set());
+
   const [activeTypes, setActiveTypes] = useState(() => {
+    if (cachedActiveTypes !== null && Array.isArray(cachedActiveTypes) && cachedActiveTypes.length > 0) {
+      return cachedActiveTypes;
+    }
+    const stored = getSessionItem(STORAGE_KEYS.ACTIVE_TYPES, "");
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const valid = parsed.filter((t) => t === "album" || t === "single");
+          if (valid.length > 0) {
+            cachedActiveTypes = valid;
+            return valid;
+          }
+        }
+      } catch {}
+    }
     const saved = settings.allowedTypes;
     const valid = Array.isArray(saved) ? saved.filter((t) => t === "album" || t === "single") : [];
-    return valid.length > 0 ? valid : ["album", "single"];
+    const fallback = valid.length > 0 ? valid : ["album", "single"];
+    cachedActiveTypes = fallback;
+    return fallback;
   });
-  const [dateRangeDays, setDateRangeDays] = useState(settings.defaultRange ?? 30);
-  const [customStartDate, setCustomStartDate] = useState("");
-  const [customEndDate, setCustomEndDate] = useState("");
-  const [layoutMode, setLayoutMode] = useState(settings.defaultLayout || "grid");
-  const [sortOrder, setSortOrder] = useState(settings.sortOrder || "newest");
 
-  // Pagination / Lazy Rendering State
-  const [visibleCount, setVisibleCount] = useState(INITIAL_BATCH_SIZE);
+  const [dateRangeDays, setDateRangeDays] = useState(() => {
+    if (cachedDateRangeDays !== null) return cachedDateRangeDays;
+    const stored = getSessionItem(STORAGE_KEYS.DATE_RANGE, "");
+    if (stored !== "") {
+      const parsed = Number(stored);
+      if (!isNaN(parsed)) {
+        cachedDateRangeDays = parsed;
+        return parsed;
+      }
+    }
+    const fallback = settings.defaultRange ?? 30;
+    cachedDateRangeDays = fallback;
+    return fallback;
+  });
+
+  const [customStartDate, setCustomStartDate] = useState(() => {
+    if (cachedCustomStartDate !== null) return cachedCustomStartDate;
+    return getSessionItem(STORAGE_KEYS.CUSTOM_START_DATE, "");
+  });
+
+  const [customEndDate, setCustomEndDate] = useState(() => {
+    if (cachedCustomEndDate !== null) return cachedCustomEndDate;
+    return getSessionItem(STORAGE_KEYS.CUSTOM_END_DATE, "");
+  });
+
+  const [layoutMode, setLayoutMode] = useState(() => {
+    if (cachedLayoutMode !== null) return cachedLayoutMode;
+    const stored = getSessionItem(STORAGE_KEYS.LAYOUT_MODE, "");
+    if (stored === "grid" || stored === "list") {
+      cachedLayoutMode = stored;
+      return stored;
+    }
+    const fallback = settings.defaultLayout || "grid";
+    cachedLayoutMode = fallback;
+    return fallback;
+  });
+
+  const [sortOrder, setSortOrder] = useState(() => {
+    if (cachedSortOrder !== null) return cachedSortOrder;
+    const stored = getSessionItem(STORAGE_KEYS.SORT_ORDER, "");
+    if (stored === "newest" || stored === "oldest") {
+      cachedSortOrder = stored;
+      return stored;
+    }
+    const fallback = settings.sortOrder || "newest";
+    cachedSortOrder = fallback;
+    return fallback;
+  });
+
+  // Pagination / Lazy Rendering State (Restores previous count across navigation)
+  const [visibleCount, setVisibleCount] = useState(() => cachedVisibleCount || INITIAL_BATCH_SIZE);
+
+  // Synchronize state with module-level caches and persistent storage
+  useEffect(() => {
+    cachedSearchQuery = searchQuery;
+    if (searchQuery) setSessionItem(STORAGE_KEYS.SEARCH_QUERY, searchQuery);
+    else removeSessionItem(STORAGE_KEYS.SEARCH_QUERY);
+  }, [searchQuery]);
+
+  useEffect(() => {
+    cachedOnlySaved = onlySaved;
+    setSessionItem(STORAGE_KEYS.ONLY_SAVED, String(onlySaved));
+  }, [onlySaved]);
+
+  useEffect(() => {
+    cachedActiveTypes = activeTypes;
+    setSessionItem(STORAGE_KEYS.ACTIVE_TYPES, JSON.stringify(activeTypes));
+  }, [activeTypes]);
+
+  useEffect(() => {
+    cachedDateRangeDays = dateRangeDays;
+    setSessionItem(STORAGE_KEYS.DATE_RANGE, String(dateRangeDays));
+  }, [dateRangeDays]);
+
+  useEffect(() => {
+    cachedCustomStartDate = customStartDate;
+    if (customStartDate) setSessionItem(STORAGE_KEYS.CUSTOM_START_DATE, customStartDate);
+    else removeSessionItem(STORAGE_KEYS.CUSTOM_START_DATE);
+  }, [customStartDate]);
+
+  useEffect(() => {
+    cachedCustomEndDate = customEndDate;
+    if (customEndDate) setSessionItem(STORAGE_KEYS.CUSTOM_END_DATE, customEndDate);
+    else removeSessionItem(STORAGE_KEYS.CUSTOM_END_DATE);
+  }, [customEndDate]);
+
+  useEffect(() => {
+    cachedLayoutMode = layoutMode;
+    setSessionItem(STORAGE_KEYS.LAYOUT_MODE, layoutMode);
+  }, [layoutMode]);
+
+  useEffect(() => {
+    cachedSortOrder = sortOrder;
+    setSessionItem(STORAGE_KEYS.SORT_ORDER, sortOrder);
+  }, [sortOrder]);
+
+  useEffect(() => {
+    cachedVisibleCount = visibleCount;
+  }, [visibleCount]);
+
+  // Scroll Position Tracking and Restoration across navigation
+  const hasRestoredScroll = useRef(false);
+  useEffect(() => {
+    let scrollEl = null;
+    let ticking = false;
+
+    const handleScroll = () => {
+      if (!ticking) {
+        window.requestAnimationFrame(() => {
+          if (scrollEl) {
+            cachedScrollTop = scrollEl.scrollTop;
+          }
+          ticking = false;
+        });
+        ticking = true;
+      }
+    };
+
+    const timer = setTimeout(() => {
+      scrollEl = getSpotifyScrollContainer();
+      if (scrollEl && typeof scrollEl.addEventListener === "function") {
+        scrollEl.addEventListener("scroll", handleScroll, { passive: true });
+        if (cachedScrollTop > 0 && !hasRestoredScroll.current) {
+          scrollEl.scrollTop = cachedScrollTop;
+          hasRestoredScroll.current = true;
+        }
+      }
+    }, 40);
+
+    return () => {
+      clearTimeout(timer);
+      if (scrollEl && typeof scrollEl.removeEventListener === "function") {
+        if (scrollEl.scrollTop > 0) {
+          cachedScrollTop = scrollEl.scrollTop;
+        }
+        scrollEl.removeEventListener("scroll", handleScroll);
+      }
+    };
+  }, []);
 
   // Settings Modal State
   const [showSettingsModal, setShowSettingsModal] = useState(false);
@@ -1345,6 +1662,15 @@ function ReleaseListApp() {
   const searchInputRef = useRef(null);
   const sentinelRef = useRef(null);
   const isSyncingRef = useRef(false);
+  const abortSyncRef = useRef(false);
+
+  // Clean up running sync on unmount to prevent worker leaks
+  useEffect(() => {
+    return () => {
+      abortSyncRef.current = true;
+      isSyncingRef.current = false;
+    };
+  }, []);
 
   // Save Settings helper
   const updateSettings = (newPartial) => {
@@ -1368,16 +1694,36 @@ function ReleaseListApp() {
     if (!forceRefresh) {
       const cached = await getCachedCatalog();
       if (cached && Array.isArray(cached.items) && cached.items.length > 0) {
-        setReleases(cached.items);
+        // Heal cached items in case they have old UTC midnight timestamps
+        let wasHealed = false;
+        const healedItems = cached.items.map((item) => {
+          if (item?.dateStr) {
+            const { time } = parseReleaseDate(item.dateStr);
+            if (time > 0 && time !== item.time) {
+              wasHealed = true;
+              return { ...item, time };
+            }
+          }
+          return item;
+        });
+
+        if (wasHealed) {
+          healedItems.sort((a, b) => b.time - a.time);
+          cached.items = healedItems;
+          saveCachedCatalog(cached).catch(() => {});
+        }
+
+        setReleases(healedItems);
         setCacheMeta({ timestamp: cached.timestamp, artistCount: cached.artistCount || 0 });
         setIsCached(true);
         setLoading(false);
 
-        // Check if cache TTL expired
+        // Check if cache TTL expired (throttle background auto-sync so navigating between views does not spam sync)
         const ttlHours = settings.cacheTTLHours ?? 12;
         if (ttlHours > 0) {
           const ttlMs = ttlHours * 3600 * 1000;
-          if (Date.now() - cached.timestamp > ttlMs) {
+          if (Date.now() - cached.timestamp > ttlMs && Date.now() - lastBgSyncTimestamp > 30 * 60 * 1000) {
+            lastBgSyncTimestamp = Date.now();
             console.log("[ReleaseList] Cache TTL expired, syncing in background...");
             refreshCatalog(true); // background silent sync
           }
@@ -1392,10 +1738,13 @@ function ReleaseListApp() {
 
   const refreshCatalog = async (isBackground = false, overrideSyncWindow = null) => {
     if (isSyncingRef.current) {
-      console.log("[ReleaseList] Sync already in progress, skipping duplicate call.");
+      if (!isBackground) {
+        Spicetify.showNotification?.("Release sync is already in progress...");
+      }
       return;
     }
     isSyncingRef.current = true;
+    abortSyncRef.current = false;
     try {
       if (!isBackground) setLoading(true);
       const artists = await fetchFollowedArtists();
@@ -1403,6 +1752,9 @@ function ReleaseListApp() {
         console.warn("[ReleaseList] Followed artists returned empty. Keeping existing cached releases.");
         if (inMemoryCatalog?.items?.length) {
           setReleases(inMemoryCatalog.items);
+        }
+        if (!isBackground) {
+          Spicetify.showNotification?.("Could not load followed artists. Check connection.", true);
         }
         setLoading(false);
         return;
@@ -1414,17 +1766,18 @@ function ReleaseListApp() {
       const windowDays = overrideSyncWindow !== null ? overrideSyncWindow : (settings.syncWindowDays ?? 180);
       const cutoffTime = windowDays > 0 ? Date.now() - windowDays * DAY_MS : 0;
 
-      // Controlled concurrency (3 workers, 60ms pacing delay)
+      // Controlled concurrency (3 workers, 80ms pacing delay) with abort capability
       const discographyArrays = await runConcurrentPool(
         artists,
         3,
         async (artist) => {
           const rawItems = await fetchArtistReleasesGraphQL(artist.uri, 50);
+          if (!rawItems) return null;
           const mapped = [];
 
           for (const item of rawItems) {
-            const dateStr = item.date?.isoString || item.date?.year || "";
-            const timeMs = Date.parse(dateStr) || 0;
+            const rawDate = item.date?.isoString || item.date?.year || "";
+            const { time: timeMs, dateStr: cleanDateStr } = parseReleaseDate(rawDate);
 
             // Discard releases older than the sync window
             if (cutoffTime > 0 && timeMs > 0 && timeMs < cutoffTime) {
@@ -1449,7 +1802,7 @@ function ReleaseListApp() {
                 uri: artist.uri,
               },
               imageURL: coverUrl,
-              dateStr: dateStr.split("T")[0],
+              dateStr: cleanDateStr,
               time: timeMs,
               type: releaseType,
               trackCount: item.tracks?.totalCount || 1,
@@ -1460,15 +1813,26 @@ function ReleaseListApp() {
         (done, total) => {
           setSyncProgress({ current: done, total });
         },
-        60
+        80,
+        () => abortSyncRef.current
       );
+
+      if (abortSyncRef.current) {
+        console.log("[ReleaseList] Sync was cancelled or unmounted.");
+        return;
+      }
 
       const flattened = discographyArrays.filter(Boolean).flat();
 
-      // Deduplicate releases by URI
+      // Deduplicate releases by URI, seeding with existing releases so partial syncs never drop catalog data
       const uniqueMap = new Map();
+      if (Array.isArray(inMemoryCatalog?.items)) {
+        inMemoryCatalog.items.forEach((r) => {
+          if (r?.uri) uniqueMap.set(r.uri, r);
+        });
+      }
       flattened.forEach((r) => {
-        if (!uniqueMap.has(r.uri)) {
+        if (r?.uri) {
           uniqueMap.set(r.uri, r);
         }
       });
@@ -1519,9 +1883,16 @@ function ReleaseListApp() {
     });
   };
 
-  // Reset visibleCount whenever filters change to keep DOM lightweight
+  // Reset visibleCount ONLY when user explicitly changes filters while on page (avoids resetting on remount)
+  const isFilterMount = useRef(true);
   useEffect(() => {
+    if (isFilterMount.current) {
+      isFilterMount.current = false;
+      return;
+    }
     setVisibleCount(INITIAL_BATCH_SIZE);
+    cachedVisibleCount = INITIAL_BATCH_SIZE;
+    cachedScrollTop = 0;
   }, [searchQuery, activeTypes, onlySaved, dateRangeDays, customStartDate, customEndDate, sortOrder]);
 
   // Load saved album URIs on startup (cached first, then sync from LibraryAPI)
@@ -1579,11 +1950,11 @@ function ReleaseListApp() {
         if (r.time < cutoff) return false;
       } else if (dateRangeDays === -1) {
         if (customStartDate) {
-          const startMs = Date.parse(customStartDate);
+          const startMs = parseReleaseDate(customStartDate).time - 12 * 3600 * 1000;
           if (!isNaN(startMs) && r.time < startMs) return false;
         }
         if (customEndDate) {
-          const endMs = Date.parse(customEndDate) + DAY_MS;
+          const endMs = parseReleaseDate(customEndDate).time + 12 * 3600 * 1000;
           if (!isNaN(endMs) && r.time > endMs) return false;
         }
       }
@@ -1625,7 +1996,9 @@ function ReleaseListApp() {
         if (entries[0].isIntersecting) {
           setVisibleCount((prev) => {
             if (prev < filteredReleases.length) {
-              return Math.min(prev + LOAD_MORE_STEP, filteredReleases.length);
+              const next = Math.min(prev + LOAD_MORE_STEP, filteredReleases.length);
+              cachedVisibleCount = next;
+              return next;
             }
             return prev;
           });
@@ -1636,6 +2009,17 @@ function ReleaseListApp() {
     observer.observe(sentinelRef.current);
     return () => observer.disconnect();
   }, [filteredReleases.length]);
+
+  // Ensure scroll position is restored when items are rendered
+  useEffect(() => {
+    if (cachedScrollTop > 0 && visibleReleases.length > 0 && !hasRestoredScroll.current) {
+      const scrollEl = getSpotifyScrollContainer();
+      if (scrollEl) {
+        scrollEl.scrollTop = cachedScrollTop;
+        hasRestoredScroll.current = true;
+      }
+    }
+  }, [visibleReleases.length]);
 
   // Group visible items by Feed Mode (Date, Date + Type, or Type) & Order
   const feedSections = useMemo(() => {
@@ -1690,7 +2074,7 @@ function ReleaseListApp() {
       // Day-by-Day with release type subheadings
       const dateMap = new Map();
       visibleReleases.forEach((r) => {
-        const header = getDayHeader(r.time, now);
+        const header = getDayHeader(r.time, now, r.dateStr);
         if (!dateMap.has(header)) dateMap.set(header, []);
         dateMap.get(header).push(r);
       });
@@ -1730,7 +2114,7 @@ function ReleaseListApp() {
     // Default: 'date' mode (Day-by-Day Timeline)
     const dateMap = new Map();
     visibleReleases.forEach((r) => {
-      const header = getDayHeader(r.time, now);
+      const header = getDayHeader(r.time, now, r.dateStr);
       if (!dateMap.has(header)) dateMap.set(header, []);
       dateMap.get(header).push(r);
     });
