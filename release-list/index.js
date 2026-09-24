@@ -30,7 +30,6 @@ if (typeof document !== "undefined" && !document.getElementById("release-list-st
       padding: 24px 32px 64px 32px;
       animation: rl-fade-in 0.25s cubic-bezier(0.16, 1, 0.3, 1);
       color: var(--spice-text, #ffffff);
-      font-family: var(--font-family, spotify-circular, Helvetica, Arial, sans-serif);
       box-sizing: border-box;
       min-height: 100vh;
     }
@@ -333,7 +332,7 @@ if (typeof document !== "undefined" && !document.getElementById("release-list-st
       padding: 0 !important;
       box-sizing: border-box !important;
       color: var(--spice-text, #ffffff);
-      font-family: var(--font-family, spotify-circular, Helvetica, Arial, sans-serif);
+      font-family: var(--encore-body-font-stack, sans-serif);
     }
     .rl-modal-card {
       background: #181818 !important;
@@ -2158,11 +2157,10 @@ function ReleaseListApp() {
           {
             style: {
               margin: 0,
-              fontSize: 28,
+              fontSize: 26,
               fontWeight: 800,
               letterSpacing: "-0.5px",
               color: "var(--spice-text, #ffffff)",
-              lineHeight: 1.1,
             },
           },
           "Release List"
@@ -2174,7 +2172,6 @@ function ReleaseListApp() {
               fontSize: 13,
               color: "var(--spice-subtext, rgba(255, 255, 255, 0.6))",
               marginTop: 4,
-              fontWeight: 500,
             },
           },
           `${filteredReleases.length} releases`
