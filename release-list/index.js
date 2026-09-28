@@ -778,13 +778,17 @@ function setStoredJSON(key, val) {
   }
 }
 
-function formatDate(dateObj, locale = "en-US") {
-  return new Intl.DateTimeFormat(locale, {
-    weekday: "long",
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  }).format(dateObj);
+// Formatters are expensive to construct, so build them once
+const FULL_DATE_FORMAT = new Intl.DateTimeFormat("en-US", {
+  weekday: "long",
+  year: "numeric",
+  month: "long",
+  day: "numeric",
+});
+const WEEKDAY_FORMAT = new Intl.DateTimeFormat("en-US", { weekday: "long" });
+
+function formatDate(dateObj) {
+  return FULL_DATE_FORMAT.format(dateObj);
 }
 
 function parseReleaseDate(dateStr) {
@@ -823,7 +827,7 @@ function getDayHeader(timeMs, now = Date.now(), dateStr = "") {
   if (diffDays === 0) return "Today";
   if (diffDays === 1) return "Yesterday";
   if (diffDays > 1 && diffDays <= 6) {
-    return new Intl.DateTimeFormat("en-US", { weekday: "long" }).format(target);
+    return WEEKDAY_FORMAT.format(target);
   }
   return formatDate(target);
 }
@@ -1068,13 +1072,17 @@ const ReleaseCard = React.memo(function ReleaseCard({ release, groupColors, isSa
     React.createElement(
       "div",
       { className: "rl-card-artwork-wrapper" },
-      React.createElement("img", {
-        className: "rl-card-artwork",
-        src: release.imageURL || "spotify:image:default",
-        alt: release.title,
-        loading: "lazy",
-        decoding: "async",
-      }),
+      release.imageURL
+        ? React.createElement("img", {
+            className: "rl-card-artwork",
+            src: release.imageURL,
+            alt: release.title,
+            loading: "lazy",
+            decoding: "async",
+          })
+        : React.createElement("div", {
+            style: { position: "absolute", inset: 0, background: "#181818" },
+          }),
       // In Library Indicator (on artwork, top right)
       isSaved &&
         React.createElement(
@@ -1217,13 +1225,14 @@ const ReleaseListRow = React.memo(function ReleaseListRow({ release, groupColors
           background: "#222",
         },
       },
-      React.createElement("img", {
-        src: release.imageURL,
-        alt: release.title,
-        loading: "lazy",
-        decoding: "async",
-        style: { width: "100%", height: "100%", objectFit: "cover" },
-      })
+      release.imageURL &&
+        React.createElement("img", {
+          src: release.imageURL,
+          alt: release.title,
+          loading: "lazy",
+          decoding: "async",
+          style: { width: "100%", height: "100%", objectFit: "cover" },
+        })
     ),
     // Details
     React.createElement(
@@ -1480,6 +1489,12 @@ function ReleaseListApp() {
     if (cachedSearchQuery !== null) return cachedSearchQuery;
     return getSessionItem(STORAGE_KEYS.SEARCH_QUERY, "");
   });
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState(searchQuery);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearchQuery(searchQuery), 150);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
 
   const [onlySaved, setOnlySaved] = useState(() => {
     if (cachedOnlySaved !== null) return cachedOnlySaved;
@@ -1719,29 +1734,25 @@ function ReleaseListApp() {
     }
 
     // 2. Otherwise run sync
-    await refreshCatalog(false);
+    await refreshCatalog();
   }, [settings.syncWindowDays]);
 
-  const refreshCatalog = async (isBackground = false, overrideSyncWindow = null) => {
+  const refreshCatalog = async (overrideSyncWindow = null) => {
     if (isSyncingRef.current) {
-      if (!isBackground) {
-        Spicetify.showNotification?.("Release sync is already in progress...");
-      }
+      Spicetify.showNotification?.("Release sync is already in progress...");
       return;
     }
     isSyncingRef.current = true;
     abortSyncRef.current = false;
     try {
-      if (!isBackground) setLoading(true);
+      setLoading(true);
       const artists = await fetchFollowedArtists();
       if (!artists || artists.length === 0) {
         console.warn("[ReleaseList] Followed artists returned empty. Keeping existing cached releases.");
         if (inMemoryCatalog?.items?.length) {
           setReleases(inMemoryCatalog.items);
         }
-        if (!isBackground) {
-          Spicetify.showNotification?.("Could not load followed artists. Check connection.", true);
-        }
+        Spicetify.showNotification?.("Could not load followed artists. Check connection.", true);
         setLoading(false);
         return;
       }
@@ -1838,12 +1849,10 @@ function ReleaseListApp() {
       setIsCached(true);
       setReleases(allUnique);
 
-      if (!isBackground) {
-        Spicetify.showNotification(`Synced ${allUnique.length} releases from ${artists.length} artists! Saved to cache.`);
-      }
+      Spicetify.showNotification(`Synced ${allUnique.length} releases from ${artists.length} artists! Saved to cache.`);
     } catch (err) {
       console.error("[ReleaseList] Catalog refresh error:", err);
-      if (!isBackground) Spicetify.showNotification("Error syncing releases. Check console.", true);
+      Spicetify.showNotification("Error syncing releases. Check console.", true);
     } finally {
       isSyncingRef.current = false;
       setLoading(false);
@@ -1879,7 +1888,7 @@ function ReleaseListApp() {
     setVisibleCount(INITIAL_BATCH_SIZE);
     cachedVisibleCount = INITIAL_BATCH_SIZE;
     cachedScrollTop = 0;
-  }, [searchQuery, activeTypes, onlySaved, dateRangeDays, customStartDate, customEndDate, sortOrder]);
+  }, [debouncedSearchQuery, activeTypes, onlySaved, dateRangeDays, customStartDate, customEndDate, sortOrder]);
 
   // Load saved album URIs on startup (cached first, then sync from LibraryAPI)
   useEffect(() => {
@@ -1923,7 +1932,7 @@ function ReleaseListApp() {
   // Filtered and Sorted Releases
   const filteredReleases = useMemo(() => {
     const now = Date.now();
-    const searchMatcher = createSearchMatcher(searchQuery);
+    const searchMatcher = createSearchMatcher(debouncedSearchQuery);
 
     const result = releases.filter((r) => {
       // 1. Category Type filter (strictly Albums and Singles/EPs only)
@@ -1946,7 +1955,7 @@ function ReleaseListApp() {
       }
 
       // 3. Search query filter (smart diacritics and special character matching)
-      if (searchQuery.trim()) {
+      if (debouncedSearchQuery.trim()) {
         const titleMatch = searchMatcher(r.title);
         const artistMatch = searchMatcher(r.artist?.name);
         if (!titleMatch && !artistMatch) return false;
@@ -1967,7 +1976,7 @@ function ReleaseListApp() {
     }
 
     return result;
-  }, [releases, activeTypes, onlySaved, savedAlbumUris, dateRangeDays, customStartDate, customEndDate, searchQuery, sortOrder]);
+  }, [releases, activeTypes, onlySaved, savedAlbumUris, dateRangeDays, customStartDate, customEndDate, debouncedSearchQuery, sortOrder]);
 
   const visibleItemCount = Math.min(visibleCount, filteredReleases.length);
 
@@ -2008,6 +2017,16 @@ function ReleaseListApp() {
   // Grouping happens before pagination so loading more only appends to the end of the layout.
   const allFeedSections = useMemo(() => {
     const now = Date.now();
+    const headerCache = new Map();
+    const dayHeaderFor = (r) => {
+      const key = r.dateStr || r.time;
+      let header = headerCache.get(key);
+      if (header === undefined) {
+        header = getDayHeader(r.time, now, r.dateStr);
+        headerCache.set(key, header);
+      }
+      return header;
+    };
     const mode = settings.groupBy || "date";
     const order = settings.releasesOrder || "artist";
 
@@ -2058,7 +2077,7 @@ function ReleaseListApp() {
       // Day-by-Day with release type subheadings
       const dateMap = new Map();
       filteredReleases.forEach((r) => {
-        const header = getDayHeader(r.time, now, r.dateStr);
+        const header = dayHeaderFor(r);
         if (!dateMap.has(header)) dateMap.set(header, []);
         dateMap.get(header).push(r);
       });
@@ -2099,7 +2118,7 @@ function ReleaseListApp() {
     // Default: 'date' mode (Day-by-Day Timeline)
     const dateMap = new Map();
     filteredReleases.forEach((r) => {
-      const header = getDayHeader(r.time, now, r.dateStr);
+      const header = dayHeaderFor(r);
       if (!dateMap.has(header)) dateMap.set(header, []);
       dateMap.get(header).push(r);
     });
@@ -2312,7 +2331,7 @@ function ReleaseListApp() {
               alignItems: "center",
               gap: "6px",
             },
-            onClick: () => refreshCatalog(false),
+            onClick: () => refreshCatalog(),
             disabled: loading,
             title: "Sync fresh releases from Spotify",
           },
@@ -2943,7 +2962,7 @@ function ReleaseListApp() {
                     const val = Number(e.target.value);
                     updateSettings({ syncWindowDays: val });
                     Spicetify.showNotification(`Catalog depth set to ${val === 0 ? "All Time" : `${val} days`}. Syncing...`);
-                    refreshCatalog(false, val);
+                    refreshCatalog(val);
                   },
                   style: {
                     width: "100%",
@@ -3230,7 +3249,7 @@ function ReleaseListApp() {
                 {
                   className: "rl-chip active",
                   onClick: () => {
-                    refreshCatalog(false);
+                    refreshCatalog();
                     setShowSettingsModal(false);
                   },
                 },
