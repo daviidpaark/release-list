@@ -55,8 +55,8 @@ Release List is designed to minimize Spotify API traffic:
    - Prevents hitting HTTP `429 Too Many Requests` limits.
 3. **Configurable Catalog Depth & Sync Window**:
    - Limit scan depth (*90 Days*, *180 Days / 6 Months*, *365 Days*, or *All Time*) to prevent pulling decades of ancient discographies.
-4. **Configurable Sync Frequency**:
-   - In Settings, customize the automatic background cache refresh interval (*Manual Only*, *Every 6 Hours*, *Every 12 Hours*, or *Every 24 Hours*).
+4. **Manual Sync**:
+   - New releases are fetched only when you press the refresh button or trigger a resync from Settings.
 
 ---
 
@@ -64,7 +64,7 @@ Release List is designed to minimize Spotify API traffic:
 
 Click the **⚙ Settings** button in the top bar to access:
 
-- **General**: Default filter range, release date sorting order, sync history depth, and background auto-sync frequency.
+- **General**: Default filter range, release date sorting order, and sync history depth.
 - **Grouping & Release Types**: Feed grouping mode (Timeline, Subgroups, or By Type), release ordering within groups, release type toggles (*Albums*, *Singles & EPs*), and release type color scheme customization.
 - **Cache & Storage**: View storage engine details, cached release and artist counts, last sync timestamp, and trigger a manual resync or cache wipe.
 

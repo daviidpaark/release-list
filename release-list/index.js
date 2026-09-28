@@ -757,7 +757,6 @@ const DEFAULT_SETTINGS = {
     album: "#e0b766",
     single: "#bc8edd",
   },
-  cacheTTLHours: 12, // 0 = manual only, 6, 12, 24
   syncWindowDays: 180, // Track up to 6 months of releases (0 = All Time)
   allowedTypes: ["album", "single"], // release types enabled
 };
@@ -1378,7 +1377,6 @@ let cachedLayoutMode = null;
 let cachedSortOrder = null;
 let cachedVisibleCount = INITIAL_BATCH_SIZE;
 let cachedScrollTop = 0;
-let lastBgSyncTimestamp = 0;
 
 function getSessionItem(key, fallback = "") {
   try {
@@ -1716,24 +1714,13 @@ function ReleaseListApp() {
         setCacheMeta({ timestamp: cached.timestamp, artistCount: cached.artistCount || 0 });
         setIsCached(true);
         setLoading(false);
-
-        // Check if cache TTL expired (throttle background auto-sync so navigating between views does not spam sync)
-        const ttlHours = settings.cacheTTLHours ?? 12;
-        if (ttlHours > 0) {
-          const ttlMs = ttlHours * 3600 * 1000;
-          if (Date.now() - cached.timestamp > ttlMs && Date.now() - lastBgSyncTimestamp > 30 * 60 * 1000) {
-            lastBgSyncTimestamp = Date.now();
-            console.log("[ReleaseList] Cache TTL expired, syncing in background...");
-            refreshCatalog(true); // background silent sync
-          }
-        }
         return;
       }
     }
 
     // 2. Otherwise run sync
     await refreshCatalog(false);
-  }, [settings.cacheTTLHours, settings.syncWindowDays]);
+  }, [settings.syncWindowDays]);
 
   const refreshCatalog = async (isBackground = false, overrideSyncWindow = null) => {
     if (isSyncingRef.current) {
@@ -1982,10 +1969,7 @@ function ReleaseListApp() {
     return result;
   }, [releases, activeTypes, onlySaved, savedAlbumUris, dateRangeDays, customStartDate, customEndDate, searchQuery, sortOrder]);
 
-  // Paginated visible releases
-  const visibleReleases = useMemo(() => {
-    return filteredReleases.slice(0, visibleCount);
-  }, [filteredReleases, visibleCount]);
+  const visibleItemCount = Math.min(visibleCount, filteredReleases.length);
 
   // IntersectionObserver for Infinite Scrolling near bottom
   useEffect(() => {
@@ -2003,7 +1987,7 @@ function ReleaseListApp() {
           });
         }
       },
-      { rootMargin: "600px" }
+      { rootMargin: "2000px" }
     );
     observer.observe(sentinelRef.current);
     return () => observer.disconnect();
@@ -2011,17 +1995,18 @@ function ReleaseListApp() {
 
   // Ensure scroll position is restored when items are rendered
   useEffect(() => {
-    if (cachedScrollTop > 0 && visibleReleases.length > 0 && !hasRestoredScroll.current) {
+    if (cachedScrollTop > 0 && visibleItemCount > 0 && !hasRestoredScroll.current) {
       const scrollEl = getSpotifyScrollContainer();
       if (scrollEl) {
         scrollEl.scrollTop = cachedScrollTop;
         hasRestoredScroll.current = true;
       }
     }
-  }, [visibleReleases.length]);
+  }, [visibleItemCount]);
 
-  // Group visible items by Feed Mode (Date, Date + Type, or Type) & Order
-  const feedSections = useMemo(() => {
+  // Group all filtered items by Feed Mode (Date, Date + Type, or Type) & Order.
+  // Grouping happens before pagination so loading more only appends to the end of the layout.
+  const allFeedSections = useMemo(() => {
     const now = Date.now();
     const mode = settings.groupBy || "date";
     const order = settings.releasesOrder || "artist";
@@ -2047,7 +2032,7 @@ function ReleaseListApp() {
       const typeKeys = ["album", "single"];
       typeKeys.forEach((k) => typeMap.set(k, []));
 
-      visibleReleases.forEach((r) => {
+      filteredReleases.forEach((r) => {
         if (!typeMap.has(r.type)) typeMap.set(r.type, []);
         typeMap.get(r.type).push(r);
       });
@@ -2072,7 +2057,7 @@ function ReleaseListApp() {
     if (mode === "date_type") {
       // Day-by-Day with release type subheadings
       const dateMap = new Map();
-      visibleReleases.forEach((r) => {
+      filteredReleases.forEach((r) => {
         const header = getDayHeader(r.time, now, r.dateStr);
         if (!dateMap.has(header)) dateMap.set(header, []);
         dateMap.get(header).push(r);
@@ -2095,6 +2080,7 @@ function ReleaseListApp() {
               title: badge.label,
               badgeBg: badge.bg,
               badgeFg: badge.fg,
+              count: subMap.get(typeKey).length,
               items: subMap.get(typeKey),
             };
           });
@@ -2112,7 +2098,7 @@ function ReleaseListApp() {
 
     // Default: 'date' mode (Day-by-Day Timeline)
     const dateMap = new Map();
-    visibleReleases.forEach((r) => {
+    filteredReleases.forEach((r) => {
       const header = getDayHeader(r.time, now, r.dateStr);
       if (!dateMap.has(header)) dateMap.set(header, []);
       dateMap.get(header).push(r);
@@ -2129,7 +2115,31 @@ function ReleaseListApp() {
         subgroups: null,
       };
     });
-  }, [visibleReleases, settings.groupBy, settings.releasesOrder, settings.groupColors]);
+  }, [filteredReleases, settings.groupBy, settings.releasesOrder, settings.groupColors]);
+
+  // Take the first visibleCount items in rendered order, keeping full group counts in headers
+  const feedSections = useMemo(() => {
+    let remaining = visibleItemCount;
+    const result = [];
+    for (const section of allFeedSections) {
+      if (remaining <= 0) break;
+      if (section.subgroups) {
+        const subgroups = [];
+        for (const sub of section.subgroups) {
+          if (remaining <= 0) break;
+          const items = sub.items.slice(0, remaining);
+          remaining -= items.length;
+          subgroups.push({ ...sub, items });
+        }
+        result.push({ ...section, subgroups });
+      } else {
+        const items = section.items.slice(0, remaining);
+        remaining -= items.length;
+        result.push({ ...section, items });
+      }
+    }
+    return result;
+  }, [allFeedSections, visibleItemCount]);
 
   // Render UI
   return React.createElement(
@@ -2703,7 +2713,7 @@ function ReleaseListApp() {
                   React.createElement(
                     "span",
                     { style: { fontSize: 11, color: "rgba(255, 255, 255, 0.4)" } },
-                    `(${sub.items.length})`
+                    `(${sub.count})`
                   )
                 ),
                 // Subgroup items
@@ -2789,7 +2799,7 @@ function ReleaseListApp() {
         React.createElement(
           "div",
           { style: { fontSize: 13, color: "rgba(255,255,255,0.5)", fontWeight: 500 } },
-          `Showing ${visibleReleases.length} of ${filteredReleases.length} releases`
+          `Showing ${visibleItemCount} of ${filteredReleases.length} releases`
         ),
 
         // Load More Buttons
@@ -2953,36 +2963,6 @@ function ReleaseListApp() {
                 "div",
                 { style: { fontSize: 11, color: "rgba(255,255,255,0.45)", marginTop: 4 } },
                 "Limits how far back Release List scans for releases. Keeps your local cache lean, fast, and free of ancient albums."
-              )
-            ),
-            // Cache Auto-Sync Interval
-            React.createElement(
-              "div",
-              null,
-              React.createElement("label", { style: { fontSize: 13, fontWeight: 600, display: "block", marginBottom: 6 } }, "Automatic Background Sync Interval"),
-              React.createElement(
-                "select",
-                {
-                  value: settings.cacheTTLHours,
-                  onChange: (e) => updateSettings({ cacheTTLHours: Number(e.target.value) }),
-                  style: {
-                    width: "100%",
-                    padding: "8px 12px",
-                    background: "#282828",
-                    border: "1px solid rgba(255,255,255,0.15)",
-                    borderRadius: 6,
-                    color: "#fff",
-                  },
-                },
-                React.createElement("option", { value: 0 }, "Manual Only (Never auto-sync)"),
-                React.createElement("option", { value: 6 }, "Every 6 Hours"),
-                React.createElement("option", { value: 12 }, "Every 12 Hours (Recommended)"),
-                React.createElement("option", { value: 24 }, "Every 24 Hours")
-              ),
-              React.createElement(
-                "div",
-                { style: { fontSize: 11, color: "rgba(255,255,255,0.45)", marginTop: 4 } },
-                "Controls how often Release List checks for new releases behind the scenes. Opening the app always loads instantly from cache."
               )
             )
           ),
