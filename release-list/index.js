@@ -65,22 +65,16 @@ if (typeof document !== "undefined" && !document.getElementById("release-list-st
     /* High-Performance Card with Off-screen Rendering Optimization */
     .rl-card {
       position: relative;
-      background: rgba(255, 255, 255, 0.04);
-      border: 1px solid rgba(255, 255, 255, 0.07);
-      border-radius: 8px;
-      padding: 14px;
-      transition: background 0.18s ease, border-color 0.18s ease, transform 0.18s ease;
+      padding: 0 0 8px;
+      transition: transform 0.18s ease;
       display: flex;
       flex-direction: column;
+      min-width: 0;
       cursor: pointer;
-      overflow: hidden;
       user-select: none;
     }
     .rl-card:hover {
-      background: rgba(255, 255, 255, 0.09);
-      border-color: rgba(255, 255, 255, 0.16);
       transform: translateY(-3px);
-      box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
     }
 
     .rl-card-artwork-wrapper {
@@ -157,25 +151,7 @@ if (typeof document !== "undefined" && !document.getElementById("release-list-st
       background: #1fdf64;
     }
 
-    .rl-in-library-badge-row {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      font-size: 10px;
-      font-weight: 700;
-      padding: 2px 7px;
-      border-radius: 4px;
-      background: rgba(30, 215, 96, 0.15);
-      color: #1ed760;
-      border: 1px solid rgba(30, 215, 96, 0.3);
-      cursor: pointer;
-      transition: background 0.15s ease;
-    }
-    .rl-in-library-badge-row:hover {
-      background: rgba(30, 215, 96, 0.25);
-    }
-
-    /* Reactive Interactive Card & List Elements */
+    /* Reactive Interactive Card Elements */
     .rl-card-title {
       font-size: 14px;
       font-weight: 700;
@@ -209,40 +185,6 @@ if (typeof document !== "undefined" && !document.getElementById("release-list-st
       text-decoration: underline !important;
     }
 
-    .rl-list-title {
-      font-size: 14px;
-      font-weight: 700;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      color: #ffffff;
-      cursor: pointer;
-      width: fit-content;
-      max-width: 100%;
-      transition: text-decoration 0.12s ease;
-    }
-    .rl-list-title:hover {
-      text-decoration: underline !important;
-    }
-
-    .rl-list-artist {
-      font-size: 12px;
-      color: rgba(255, 255, 255, 0.65);
-      cursor: pointer;
-      display: inline-flex;
-      align-items: center;
-      width: fit-content;
-      max-width: 100%;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      transition: color 0.15s ease, text-decoration 0.15s ease;
-    }
-    .rl-list-artist:hover {
-      color: #ffffff !important;
-      text-decoration: underline !important;
-    }
-
     .rl-action-btn-mini {
       background: rgba(0, 0, 0, 0.65);
       backdrop-filter: blur(8px);
@@ -261,14 +203,6 @@ if (typeof document !== "undefined" && !document.getElementById("release-list-st
       background: rgba(255, 255, 255, 0.2);
       color: #fff;
       transform: scale(1.1);
-    }
-
-    .rl-layout-btn {
-      transition: all 0.15s ease;
-    }
-    .rl-layout-btn:hover {
-      opacity: 0.9;
-      transform: scale(1.04);
     }
 
     .rl-chip {
@@ -359,21 +293,6 @@ if (typeof document !== "undefined" && !document.getElementById("release-list-st
       gap: 18px;
       max-height: calc(85vh - 135px);
       box-sizing: border-box;
-    }
-
-    /* List Row Mode */
-    .rl-list-item {
-      display: grid;
-      grid-template-columns: 50px 1fr auto auto auto;
-      gap: 16px;
-      align-items: center;
-      padding: 8px 14px;
-      border-radius: 6px;
-      transition: background 0.15s ease;
-      cursor: pointer;
-    }
-    .rl-list-item:hover {
-      background: rgba(255, 255, 255, 0.08);
     }
 
     /* Release Type Color Settings */
@@ -588,7 +507,6 @@ async function clearCachedCatalog() {
   cachedDateRangeDays = null;
   cachedCustomStartDate = null;
   cachedCustomEndDate = null;
-  cachedLayoutMode = null;
   cachedSortOrder = null;
   cachedVisibleCount = INITIAL_BATCH_SIZE;
   cachedScrollTop = 0;
@@ -600,7 +518,6 @@ async function clearCachedCatalog() {
       STORAGE_KEYS.DATE_RANGE,
       STORAGE_KEYS.CUSTOM_START_DATE,
       STORAGE_KEYS.CUSTOM_END_DATE,
-      STORAGE_KEYS.LAYOUT_MODE,
       STORAGE_KEYS.SORT_ORDER,
     ].forEach((k) => {
       if (k) removeSessionItem(k);
@@ -715,7 +632,6 @@ const STORAGE_KEYS = {
   DATE_RANGE: "release-list:date-range",
   CUSTOM_START_DATE: "release-list:custom-start-date",
   CUSTOM_END_DATE: "release-list:custom-end-date",
-  LAYOUT_MODE: "release-list:layout-mode",
   SORT_ORDER: "release-list:sort-order",
 };
 
@@ -723,14 +639,22 @@ const DAY_MS = 86400000;
 const INITIAL_BATCH_SIZE = 40;
 const LOAD_MORE_STEP = 40;
 
+const RELEASE_TYPES = ["album", "ep", "single"];
+const isReleaseType = (t) => RELEASE_TYPES.includes(t);
+
+// Spotify files EPs under singles; a "single" with this many tracks is treated as an EP
+const EP_MIN_TRACKS = 4;
+
 const TYPE_LABELS = {
   album: "ALBUM",
-  single: "SINGLE / EP",
+  ep: "EP",
+  single: "SINGLE",
 };
 
 const TYPE_ORDER_INDEX = {
   album: 0,
-  single: 1,
+  ep: 1,
+  single: 2,
 };
 
 function getContrastYIQ(hexcolor) {
@@ -750,15 +674,15 @@ function getContrastYIQ(hexcolor) {
 const DEFAULT_SETTINGS = {
   defaultRange: 30, // days (0 = All Time)
   sortOrder: "newest", // 'newest' | 'oldest'
-  defaultLayout: "grid", // 'grid' | 'list'
   groupBy: "date", // 'date' | 'date_type' | 'type'
   releasesOrder: "artist", // 'artist' | 'album-group' | 'time'
   groupColors: {
     album: "#e0b766",
+    ep: "#6ec6d8",
     single: "#bc8edd",
   },
   syncWindowDays: 180, // Track up to 6 months of releases (0 = All Time)
-  allowedTypes: ["album", "single"], // release types enabled
+  allowedTypes: RELEASE_TYPES, // release types enabled
 };
 
 function getStoredJSON(key, fallback) {
@@ -832,10 +756,11 @@ function getDayHeader(timeMs, now = Date.now(), dateStr = "") {
   return formatDate(target);
 }
 
-function normalizeType(rawType) {
+function normalizeType(rawType, trackCount = 0) {
   const t = String(rawType || "").toUpperCase();
   if (t.includes("COMPILATION") || t.includes("APPEARS_ON")) return null;
-  if (t.includes("SINGLE") || t.includes("EP")) return "single";
+  if (t === "EP") return "ep";
+  if (t.includes("SINGLE") || t.includes("EP")) return trackCount >= EP_MIN_TRACKS ? "ep" : "single";
   return "album";
 }
 
@@ -874,7 +799,10 @@ async function fetchFollowedArtists() {
   }
 }
 
-async function fetchArtistReleasesGraphQL(artistUri, limit = 50, retries = 2) {
+const DISCOGRAPHY_PAGE_SIZE = 100;
+
+// One page of an artist's discography; null when the request fails after retries
+async function fetchDiscographyPage(artistUri, offset, retries = 2) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const { data, errors } = await Spicetify.GraphQL.Request(
@@ -886,8 +814,8 @@ async function fetchArtistReleasesGraphQL(artistUri, limit = 50, retries = 2) {
         },
         {
           uri: artistUri,
-          offset: 0,
-          limit,
+          offset,
+          limit: DISCOGRAPHY_PAGE_SIZE,
         }
       );
       if (errors) {
@@ -901,8 +829,13 @@ async function fetchArtistReleasesGraphQL(artistUri, limit = 50, retries = 2) {
         console.warn("[ReleaseList] GraphQL errors for artist", artistUri, errors);
         return null;
       }
-      const allGroups = data?.artistUnion?.discography?.all?.items || [];
-      return allGroups.flatMap((group) => group.releases?.items || []);
+      const all = data?.artistUnion?.discography?.all;
+      const groups = all?.items || [];
+      return {
+        releases: groups.flatMap((group) => group.releases?.items || []),
+        groupCount: groups.length,
+        total: typeof all?.totalCount === "number" ? all.totalCount : null,
+      };
     } catch (e) {
       const errStr = String(e || "");
       const isRateLimit =
@@ -919,6 +852,34 @@ async function fetchArtistReleasesGraphQL(artistUri, limit = 50, retries = 2) {
     }
   }
   return null;
+}
+
+// Paged discography; most artists fit in one request.
+// knownTotal is the release count from the last complete sync: when it still matches, nothing
+// was added or removed, so only the first page is fetched.
+// Returns { releases, total, complete, requests }, or null when the first page fails.
+async function fetchArtistReleasesGraphQL(artistUri, knownTotal = null, pacingDelayMs = 80) {
+  const releases = [];
+  let offset = 0;
+  let total = null;
+  let requests = 0;
+
+  while (true) {
+    const page = await fetchDiscographyPage(artistUri, offset);
+    // A failed later page keeps what was fetched, marked incomplete so the next sync retries
+    if (!page) return offset === 0 ? null : { releases, total, complete: false, requests };
+
+    requests++;
+    releases.push(...page.releases);
+    total = page.total;
+    offset += page.groupCount;
+
+    const unchanged = total !== null && total === knownTotal;
+    const lastPage = page.groupCount < DISCOGRAPHY_PAGE_SIZE || (total !== null && offset >= total);
+    if (unchanged || lastPage) return { releases, total, complete: true, requests };
+
+    await new Promise((r) => setTimeout(r, pacingDelayMs));
+  }
 }
 
 // Controlled concurrency pool (3 workers, 80ms delay) with abort capability
@@ -1154,7 +1115,7 @@ const ReleaseCard = React.memo(function ReleaseCard({ release, groupColors, isSa
         },
         React.createElement(
           "div",
-          { style: { display: "flex", alignItems: "center", gap: 6 } },
+          { style: { display: "flex", alignItems: "center", gap: 6, minWidth: 0 } },
           React.createElement(
             "span",
             {
@@ -1166,6 +1127,8 @@ const ReleaseCard = React.memo(function ReleaseCard({ release, groupColors, isSa
                 backgroundColor: typeBadge.bg,
                 color: typeBadge.fg,
                 letterSpacing: "0.5px",
+                whiteSpace: "nowrap",
+                flexShrink: 0,
               },
             },
             typeBadge.label
@@ -1177,6 +1140,10 @@ const ReleaseCard = React.memo(function ReleaseCard({ release, groupColors, isSa
                 style: {
                   fontSize: 11,
                   color: "rgba(255, 255, 255, 0.5)",
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  minWidth: 0,
                 },
               },
               `${release.trackCount} tracks`
@@ -1188,146 +1155,13 @@ const ReleaseCard = React.memo(function ReleaseCard({ release, groupColors, isSa
             style: {
               fontSize: 12,
               color: "rgba(255, 255, 255, 0.5)",
+              whiteSpace: "nowrap",
+              flexShrink: 0,
+              marginLeft: 6,
             },
           },
           release.dateStr
         )
-      )
-    )
-  );
-});
-
-// --- List Row Component ---
-const ReleaseListRow = React.memo(function ReleaseListRow({ release, groupColors, isSaved = false, onToggleSave }) {
-  const typeBadge = getTypeBadge(release.type, groupColors);
-
-  return React.createElement(
-    "div",
-    {
-      className: "rl-list-item",
-      onClick: (e) => {
-        if (e.target.closest(".rl-list-artist") || e.target.closest(".rl-in-library-badge-row") || e.target.closest("button") || e.target.closest(".rl-action-btn-mini")) return;
-        Spicetify.Platform.History.push({
-          pathname: `/album/${release.uri.split(":").pop()}`,
-        });
-      },
-    },
-    // Thumbnail
-    React.createElement(
-      "div",
-      {
-        style: {
-          width: 48,
-          height: 48,
-          borderRadius: 4,
-          overflow: "hidden",
-          position: "relative",
-          background: "#222",
-        },
-      },
-      release.imageURL &&
-        React.createElement("img", {
-          src: release.imageURL,
-          alt: release.title,
-          loading: "lazy",
-          decoding: "async",
-          style: { width: "100%", height: "100%", objectFit: "cover" },
-        })
-    ),
-    // Details
-    React.createElement(
-      "div",
-      { style: { display: "flex", flexDirection: "column", gap: 2, overflow: "hidden" } },
-      React.createElement(
-        "div",
-        {
-          className: "rl-list-title",
-          title: release.title,
-        },
-        release.title
-      ),
-      React.createElement(
-        "div",
-        {
-          className: "rl-list-artist",
-          onClick: (e) => {
-            e.stopPropagation();
-            Spicetify.Platform.History.push({
-              pathname: `/artist/${release.artist.uri.split(":").pop()}`,
-            });
-          },
-          title: release.artist.name,
-        },
-        release.artist.name
-      )
-    ),
-    // Badges (Type badge + In Library badge if saved)
-    React.createElement(
-      "div",
-      { style: { display: "flex", alignItems: "center", gap: 6 } },
-      React.createElement(
-        "span",
-        {
-          style: {
-            fontSize: 10,
-            fontWeight: 800,
-            padding: "3px 8px",
-            borderRadius: 4,
-            backgroundColor: typeBadge.bg,
-            color: typeBadge.fg,
-          },
-        },
-        typeBadge.label
-      ),
-      isSaved &&
-        React.createElement(
-          "span",
-          {
-            className: "rl-in-library-badge-row",
-            title: "In your Library (click to remove)",
-            onClick: (e) => {
-              e.stopPropagation();
-              onToggleSave?.(release.uri, true);
-            },
-          },
-          React.createElement(
-            "svg",
-            { width: "10", height: "10", viewBox: "0 0 16 16", fill: "currentColor" },
-            React.createElement("path", {
-              d: "M13.985 2.383L5.674 12.14 1.34 7.805l1.414-1.414 2.92 2.92 6.897-8.106 1.414 1.178z",
-            })
-          ),
-          "In Library"
-        )
-    ),
-    // Date & Tracks
-    React.createElement(
-      "div",
-      {
-        style: {
-          fontSize: 12,
-          color: "rgba(255, 255, 255, 0.5)",
-          minWidth: 100,
-          textAlign: "right",
-        },
-      },
-      release.dateStr
-    ),
-    // Actions
-    React.createElement(
-      "div",
-      { style: { display: "flex", gap: 8, alignItems: "center" } },
-      React.createElement(
-        "button",
-        {
-          className: "rl-action-btn-mini",
-          title: "Play",
-          onClick: (e) => {
-            e.stopPropagation();
-            Spicetify.Player.playUri(release.uri);
-          },
-        },
-        "▶"
       )
     )
   );
@@ -1382,7 +1216,6 @@ let cachedActiveTypes = null;
 let cachedDateRangeDays = null;
 let cachedCustomStartDate = null;
 let cachedCustomEndDate = null;
-let cachedLayoutMode = null;
 let cachedSortOrder = null;
 let cachedVisibleCount = INITIAL_BATCH_SIZE;
 let cachedScrollTop = 0;
@@ -1460,13 +1293,30 @@ function ReleaseListApp() {
   // Settings State
   const [settings, setSettings] = useState(() => {
     const saved = getStoredJSON(STORAGE_KEYS.SETTINGS, {});
-    const allowed = Array.isArray(saved.allowedTypes)
-      ? saved.allowedTypes.filter((t) => t === "album" || t === "single")
+    let allowed = Array.isArray(saved.allowedTypes)
+      ? saved.allowedTypes.filter(isReleaseType)
       : DEFAULT_SETTINGS.allowedTypes;
+    if (allowed.length === 0) allowed = DEFAULT_SETTINGS.allowedTypes;
+
+    // One-time: EPs used to be part of "single", so keep them visible wherever singles were
+    if (!saved.epSplit) {
+      if (allowed.includes("single") && !allowed.includes("ep")) allowed = [...allowed, "ep"];
+      cachedActiveTypes = null;
+      removeSessionItem(STORAGE_KEYS.ACTIVE_TYPES);
+      setStoredJSON(STORAGE_KEYS.SETTINGS, {
+        ...saved,
+        allowedTypes: allowed,
+        epSplit: true,
+        // Random Library reads these colors, so a customized set needs the EP entry too
+        ...(saved.groupColors ? { groupColors: { ...DEFAULT_SETTINGS.groupColors, ...saved.groupColors } } : {}),
+      });
+    }
+
     return {
       ...DEFAULT_SETTINGS,
       ...saved,
-      allowedTypes: allowed && allowed.length > 0 ? allowed : ["album", "single"],
+      epSplit: true,
+      allowedTypes: allowed,
       groupColors: {
         ...DEFAULT_SETTINGS.groupColors,
         ...(saved.groupColors || {}),
@@ -1481,6 +1331,7 @@ function ReleaseListApp() {
   const [cacheMeta, setCacheMeta] = useState(() => ({
     timestamp: inMemoryCatalog?.timestamp || 0,
     artistCount: inMemoryCatalog?.artistCount || 0,
+    lastSync: inMemoryCatalog?.lastSync,
   }));
   const [isCached, setIsCached] = useState(() => Boolean(inMemoryCatalog?.items?.length));
 
@@ -1512,7 +1363,7 @@ function ReleaseListApp() {
       try {
         const parsed = JSON.parse(stored);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          const valid = parsed.filter((t) => t === "album" || t === "single");
+          const valid = parsed.filter(isReleaseType);
           if (valid.length > 0) {
             cachedActiveTypes = valid;
             return valid;
@@ -1521,8 +1372,8 @@ function ReleaseListApp() {
       } catch {}
     }
     const saved = settings.allowedTypes;
-    const valid = Array.isArray(saved) ? saved.filter((t) => t === "album" || t === "single") : [];
-    const fallback = valid.length > 0 ? valid : ["album", "single"];
+    const valid = Array.isArray(saved) ? saved.filter(isReleaseType) : [];
+    const fallback = valid.length > 0 ? valid : RELEASE_TYPES;
     cachedActiveTypes = fallback;
     return fallback;
   });
@@ -1550,18 +1401,6 @@ function ReleaseListApp() {
   const [customEndDate, setCustomEndDate] = useState(() => {
     if (cachedCustomEndDate !== null) return cachedCustomEndDate;
     return getSessionItem(STORAGE_KEYS.CUSTOM_END_DATE, "");
-  });
-
-  const [layoutMode, setLayoutMode] = useState(() => {
-    if (cachedLayoutMode !== null) return cachedLayoutMode;
-    const stored = getSessionItem(STORAGE_KEYS.LAYOUT_MODE, "");
-    if (stored === "grid" || stored === "list") {
-      cachedLayoutMode = stored;
-      return stored;
-    }
-    const fallback = settings.defaultLayout || "grid";
-    cachedLayoutMode = fallback;
-    return fallback;
   });
 
   const [sortOrder, setSortOrder] = useState(() => {
@@ -1612,11 +1451,6 @@ function ReleaseListApp() {
     if (customEndDate) setSessionItem(STORAGE_KEYS.CUSTOM_END_DATE, customEndDate);
     else removeSessionItem(STORAGE_KEYS.CUSTOM_END_DATE);
   }, [customEndDate]);
-
-  useEffect(() => {
-    cachedLayoutMode = layoutMode;
-    setSessionItem(STORAGE_KEYS.LAYOUT_MODE, layoutMode);
-  }, [layoutMode]);
 
   useEffect(() => {
     cachedSortOrder = sortOrder;
@@ -1706,17 +1540,17 @@ function ReleaseListApp() {
     if (!forceRefresh) {
       const cached = await getCachedCatalog();
       if (cached && Array.isArray(cached.items) && cached.items.length > 0) {
-        // Heal cached items in case they have old UTC midnight timestamps
+        // Heal cached items: old UTC midnight timestamps, and EPs cached as singles
         let wasHealed = false;
         const healedItems = cached.items.map((item) => {
+          let healed = item;
           if (item?.dateStr) {
             const { time } = parseReleaseDate(item.dateStr);
-            if (time > 0 && time !== item.time) {
-              wasHealed = true;
-              return { ...item, time };
-            }
+            if (time > 0 && time !== item.time) healed = { ...healed, time };
           }
-          return item;
+          if (item?.type === "single" && item.trackCount >= EP_MIN_TRACKS) healed = { ...healed, type: "ep" };
+          if (healed !== item) wasHealed = true;
+          return healed;
         });
 
         if (wasHealed) {
@@ -1726,7 +1560,7 @@ function ReleaseListApp() {
         }
 
         setReleases(healedItems);
-        setCacheMeta({ timestamp: cached.timestamp, artistCount: cached.artistCount || 0 });
+        setCacheMeta({ timestamp: cached.timestamp, artistCount: cached.artistCount || 0, lastSync: cached.lastSync });
         setIsCached(true);
         setLoading(false);
         return;
@@ -1737,7 +1571,8 @@ function ReleaseListApp() {
     await refreshCatalog();
   }, [settings.syncWindowDays]);
 
-  const refreshCatalog = async (overrideSyncWindow = null) => {
+  // full: page every discography again instead of only the artists whose release count changed
+  const refreshCatalog = async ({ windowDays: overrideSyncWindow = null, full = false } = {}) => {
     if (isSyncingRef.current) {
       Spicetify.showNotification?.("Release sync is already in progress...");
       return;
@@ -1763,16 +1598,30 @@ function ReleaseListApp() {
       const windowDays = overrideSyncWindow !== null ? overrideSyncWindow : (settings.syncWindowDays ?? 180);
       const cutoffTime = windowDays > 0 ? Date.now() - windowDays * DAY_MS : 0;
 
+      const previousTotals = inMemoryCatalog?.artistTotals || {};
+      const artistTotals = {};
+      const startedAt = Date.now();
+      const stats = { requests: 0, changed: 0, failed: 0 };
+
       // Controlled concurrency (3 workers, 80ms pacing delay) with abort capability
       const discographyArrays = await runConcurrentPool(
         artists,
         3,
         async (artist) => {
-          const rawItems = await fetchArtistReleasesGraphQL(artist.uri, 50);
-          if (!rawItems) return null;
+          const knownTotal = full ? null : previousTotals[artist.uri] ?? null;
+          const result = await fetchArtistReleasesGraphQL(artist.uri, knownTotal);
+          if (!result) {
+            stats.failed++;
+            // Keep the old count so a failed request does not force a full fetch next time
+            if (previousTotals[artist.uri] != null) artistTotals[artist.uri] = previousTotals[artist.uri];
+            return null;
+          }
+          stats.requests += result.requests;
+          if (knownTotal !== null && result.total !== knownTotal) stats.changed++;
+          if (result.complete && result.total !== null) artistTotals[artist.uri] = result.total;
           const mapped = [];
 
-          for (const item of rawItems) {
+          for (const item of result.releases) {
             const rawDate = item.date?.isoString || item.date?.year || "";
             const { time: timeMs, dateStr: cleanDateStr } = parseReleaseDate(rawDate);
 
@@ -1781,7 +1630,8 @@ function ReleaseListApp() {
               continue;
             }
 
-            const releaseType = normalizeType(item.type);
+            const trackCount = item.tracks?.totalCount || 1;
+            const releaseType = normalizeType(item.type, trackCount);
             if (!releaseType) {
               continue; // Exclude compilation, appears_on, and unrecognized types
             }
@@ -1802,7 +1652,7 @@ function ReleaseListApp() {
               dateStr: cleanDateStr,
               time: timeMs,
               type: releaseType,
-              trackCount: item.tracks?.totalCount || 1,
+              trackCount,
             });
           }
           return mapped;
@@ -1821,11 +1671,13 @@ function ReleaseListApp() {
 
       const flattened = discographyArrays.filter(Boolean).flat();
 
-      // Deduplicate releases by URI, seeding with existing releases so partial syncs never drop catalog data
+      // Deduplicate releases by URI, seeding with existing releases so partial syncs never drop catalog data.
+      // Releases from artists that are no longer followed are dropped.
+      const followedUris = new Set(artists.map((a) => a.uri));
       const uniqueMap = new Map();
       if (Array.isArray(inMemoryCatalog?.items)) {
         inMemoryCatalog.items.forEach((r) => {
-          if (r?.uri) uniqueMap.set(r.uri, r);
+          if (r?.uri && followedUris.has(r.artist?.uri)) uniqueMap.set(r.uri, r);
         });
       }
       flattened.forEach((r) => {
@@ -1840,16 +1692,20 @@ function ReleaseListApp() {
       const catalogObj = {
         timestamp: now,
         artistCount: artists.length,
+        artistTotals,
+        lastSync: { ...stats, seconds: Math.round((now - startedAt) / 1000), full: full || Object.keys(previousTotals).length === 0 },
         items: allUnique,
       };
 
       await saveCachedCatalog(catalogObj);
 
-      setCacheMeta({ timestamp: now, artistCount: artists.length });
+      setCacheMeta({ timestamp: now, artistCount: artists.length, lastSync: catalogObj.lastSync });
       setIsCached(true);
       setReleases(allUnique);
 
-      Spicetify.showNotification(`Synced ${allUnique.length} releases from ${artists.length} artists! Saved to cache.`);
+      Spicetify.showNotification(
+        `Synced ${allUnique.length} releases from ${artists.length} artists in ${catalogObj.lastSync.seconds}s (${stats.requests} requests).`
+      );
     } catch (err) {
       console.error("[ReleaseList] Catalog refresh error:", err);
       Spicetify.showNotification("Error syncing releases. Check console.", true);
@@ -1935,8 +1791,8 @@ function ReleaseListApp() {
     const searchMatcher = createSearchMatcher(debouncedSearchQuery);
 
     const result = releases.filter((r) => {
-      // 1. Category Type filter (strictly Albums and Singles/EPs only)
-      if (r.type !== "album" && r.type !== "single") return false;
+      // 1. Category Type filter (strictly Albums, EPs and Singles only)
+      if (!isReleaseType(r.type)) return false;
       if (!activeTypes.includes(r.type)) return false;
 
       // 2. Date Range filter
@@ -2046,9 +1902,9 @@ function ReleaseListApp() {
     };
 
     if (mode === "type") {
-      // Group feed by release type: Albums, Singles & EPs
+      // Group feed by release type: Albums, EPs, Singles
       const typeMap = new Map();
-      const typeKeys = ["album", "single"];
+      const typeKeys = RELEASE_TYPES;
       typeKeys.forEach((k) => typeMap.set(k, []));
 
       filteredReleases.forEach((r) => {
@@ -2084,13 +1940,13 @@ function ReleaseListApp() {
 
       return Array.from(dateMap.entries()).map(([dateHeader, dayItems]) => {
         const subMap = new Map();
-        ["album", "single"].forEach((k) => subMap.set(k, []));
+        RELEASE_TYPES.forEach((k) => subMap.set(k, []));
         dayItems.forEach((item) => {
           if (!subMap.has(item.type)) subMap.set(item.type, []);
           subMap.get(item.type).push(item);
         });
 
-        const subgroups = ["album", "single"]
+        const subgroups = RELEASE_TYPES
           .filter((k) => (subMap.get(k) || []).length > 0)
           .map((typeKey) => {
             const badge = getTypeBadge(typeKey, settings.groupColors);
@@ -2211,86 +2067,6 @@ function ReleaseListApp() {
       React.createElement(
         "div",
         { style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } },
-        // Layout Mode Switcher (Scalable Vector SVGs in Segmented Pill)
-        React.createElement(
-          "div",
-          {
-            style: {
-              display: "inline-flex",
-              alignItems: "center",
-              background: "rgba(255, 255, 255, 0.07)",
-              borderRadius: "500px",
-              padding: "3px",
-              border: "1px solid rgba(255, 255, 255, 0.1)",
-              gap: "2px",
-            },
-          },
-          React.createElement(
-            "button",
-            {
-              className: "rl-layout-btn",
-              style: {
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-                width: "32px",
-                height: "30px",
-                padding: "0",
-                background: layoutMode === "grid" ? "var(--spice-text, #ffffff)" : "transparent",
-                color: layoutMode === "grid" ? "var(--spice-main, #121212)" : "var(--spice-subtext, rgba(255, 255, 255, 0.6))",
-                border: "none",
-                borderRadius: "500px",
-                cursor: "pointer",
-              },
-              onClick: () => {
-                setLayoutMode("grid");
-                updateSettings({ defaultLayout: "grid" });
-              },
-              title: "Grid View",
-              "aria-label": "Grid View",
-            },
-            React.createElement(
-              "svg",
-              { width: "16", height: "16", viewBox: "0 0 16 16", fill: "currentColor", style: { display: "block" } },
-              React.createElement("path", {
-                d: "M1 2a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V2zm0 8a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1v-4zm8-8a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1V2zm0 8a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1v-4z",
-              })
-            )
-          ),
-          React.createElement(
-            "button",
-            {
-              className: "rl-layout-btn",
-              style: {
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-                width: "32px",
-                height: "30px",
-                padding: "0",
-                background: layoutMode === "list" ? "var(--spice-text, #ffffff)" : "transparent",
-                color: layoutMode === "list" ? "var(--spice-main, #121212)" : "var(--spice-subtext, rgba(255, 255, 255, 0.6))",
-                border: "none",
-                borderRadius: "500px",
-                cursor: "pointer",
-              },
-              onClick: () => {
-                setLayoutMode("list");
-                updateSettings({ defaultLayout: "list" });
-              },
-              title: "List View",
-              "aria-label": "List View",
-            },
-            React.createElement(
-              "svg",
-              { width: "16", height: "16", viewBox: "0 0 16 16", fill: "currentColor", style: { display: "block" } },
-              React.createElement("path", {
-                d: "M1.5 2.5a1 1 0 0 1 1-1h11a1 1 0 1 1 0 2h-11a1 1 0 0 1-1-1zm0 5.5a1 1 0 0 1 1-1h11a1 1 0 1 1 0 2h-11a1 1 0 0 1-1-1zm0 5.5a1 1 0 0 1 1-1h11a1 1 0 1 1 0 2h-11a1 1 0 0 1-1-1z",
-              })
-            )
-          )
-        ),
-
         // Settings Button
         React.createElement(
           "button",
@@ -2534,7 +2310,8 @@ function ReleaseListApp() {
           ),
           [
             { label: "Albums", val: "album" },
-            { label: "Singles & EPs", val: "single" },
+            { label: "EPs", val: "ep" },
+            { label: "Singles", val: "single" },
           ].map((item) =>
             React.createElement(
               "button",
@@ -2736,63 +2513,35 @@ function ReleaseListApp() {
                   )
                 ),
                 // Subgroup items
-                layoutMode === "grid"
-                  ? React.createElement(
-                      "div",
-                      { className: "rl-grid" },
-                      sub.items.map((release) =>
-                        React.createElement(ReleaseCard, {
-                          key: release.uri,
-                          release,
-                          groupColors: settings.groupColors,
-                          isSaved: savedAlbumUris.has(release.uri),
-                          onToggleSave: handleToggleSave,
-                        })
-                      )
-                    )
-                  : React.createElement(
-                      "div",
-                      { style: { display: "flex", flexDirection: "column", gap: 4 } },
-                      sub.items.map((release) =>
-                        React.createElement(ReleaseListRow, {
-                          key: release.uri,
-                          release,
-                          groupColors: settings.groupColors,
-                          isSaved: savedAlbumUris.has(release.uri),
-                          onToggleSave: handleToggleSave,
-                        })
-                      )
-                    )
+                React.createElement(
+                  "div",
+                  { className: "rl-grid" },
+                  sub.items.map((release) =>
+                    React.createElement(ReleaseCard, {
+                      key: release.uri,
+                      release,
+                      groupColors: settings.groupColors,
+                      isSaved: savedAlbumUris.has(release.uri),
+                      onToggleSave: handleToggleSave,
+                    })
+                  )
+                )
               )
             )
-          : // Normal items container (Grid or List)
-            layoutMode === "grid"
-            ? React.createElement(
-                "div",
-                { className: "rl-grid" },
-                section.items.map((release) =>
-                  React.createElement(ReleaseCard, {
-                    key: release.uri,
-                    release,
-                    groupColors: settings.groupColors,
-                    isSaved: savedAlbumUris.has(release.uri),
-                    onToggleSave: handleToggleSave,
-                  })
-                )
+          : // Normal items container
+            React.createElement(
+              "div",
+              { className: "rl-grid" },
+              section.items.map((release) =>
+                React.createElement(ReleaseCard, {
+                  key: release.uri,
+                  release,
+                  groupColors: settings.groupColors,
+                  isSaved: savedAlbumUris.has(release.uri),
+                  onToggleSave: handleToggleSave,
+                })
               )
-            : React.createElement(
-                "div",
-                { style: { display: "flex", flexDirection: "column", gap: 4 } },
-                section.items.map((release) =>
-                  React.createElement(ReleaseListRow, {
-                    key: release.uri,
-                    release,
-                    groupColors: settings.groupColors,
-                    isSaved: savedAlbumUris.has(release.uri),
-                    onToggleSave: handleToggleSave,
-                  })
-                )
-              )
+            )
       )
     ),
 
@@ -2962,7 +2711,7 @@ function ReleaseListApp() {
                     const val = Number(e.target.value);
                     updateSettings({ syncWindowDays: val });
                     Spicetify.showNotification(`Catalog depth set to ${val === 0 ? "All Time" : `${val} days`}. Syncing...`);
-                    refreshCatalog(val);
+                    refreshCatalog({ windowDays: val, full: true });
                   },
                   style: {
                     width: "100%",
@@ -3027,7 +2776,7 @@ function ReleaseListApp() {
                     },
                     React.createElement("option", { value: "date" }, "Day-by-Day Timeline"),
                     React.createElement("option", { value: "date_type" }, "Day-by-Day with Type Subgroups"),
-                    React.createElement("option", { value: "type" }, "By Release Type (Albums, Singles, etc.)")
+                    React.createElement("option", { value: "type" }, "By Release Type (Albums, EPs, Singles)")
                   )
                 ),
                 React.createElement(
@@ -3068,7 +2817,8 @@ function ReleaseListApp() {
                 { style: { display: "flex", flexDirection: "column", gap: 8 } },
                 [
                   { id: "album", label: "Albums (LP studio releases)", desc: "Full-length album releases" },
-                  { id: "single", label: "Singles & EPs", desc: "Single track drops and multi-track EPs" },
+                  { id: "ep", label: "EPs", desc: `Short releases with ${EP_MIN_TRACKS} or more tracks` },
+                  { id: "single", label: "Singles", desc: `Releases with fewer than ${EP_MIN_TRACKS} tracks` },
                 ].map((type) =>
                   React.createElement(
                     "label",
@@ -3109,7 +2859,7 @@ function ReleaseListApp() {
               React.createElement(
                 "div",
                 { style: { fontSize: 12, color: "rgba(255,255,255,0.6)", marginBottom: 12 } },
-                "Customize badge and accent colors for Albums and Singles / EPs:"
+                "Customize badge and accent colors for Albums, EPs and Singles:"
               ),
 
               // Color Rows
@@ -3118,7 +2868,8 @@ function ReleaseListApp() {
                 { style: { display: "flex", flexDirection: "column", gap: 8 } },
                 [
                   { key: "album", label: "Albums", desc: "Full LP studio releases", defaultColor: DEFAULT_SETTINGS.groupColors.album },
-                  { key: "single", label: "Singles & EPs", desc: "Tracks and extended plays", defaultColor: DEFAULT_SETTINGS.groupColors.single },
+                  { key: "ep", label: "EPs", desc: "Extended plays", defaultColor: DEFAULT_SETTINGS.groupColors.ep },
+                  { key: "single", label: "Singles", desc: "Single track drops", defaultColor: DEFAULT_SETTINGS.groupColors.single },
                 ].map(({ key, label, desc, defaultColor }) => {
                   const currentColor = (settings.groupColors && settings.groupColors[key]) || defaultColor;
                   const contrastFg = getContrastYIQ(currentColor);
@@ -3234,11 +2985,20 @@ function ReleaseListApp() {
                 React.createElement("strong", null, "Last Synchronized: "),
                 cacheMeta.timestamp ? new Date(cacheMeta.timestamp).toLocaleString() : "Never"
               ),
+              cacheMeta.lastSync &&
+                React.createElement(
+                  "div",
+                  null,
+                  React.createElement("strong", null, "Last Sync Run: "),
+                  `${cacheMeta.lastSync.full ? "full" : "incremental"}, ${cacheMeta.lastSync.seconds}s, ` +
+                    `${cacheMeta.lastSync.requests} requests, ${cacheMeta.lastSync.changed} artists changed, ` +
+                    `${cacheMeta.lastSync.failed} failed`
+                ),
               React.createElement(
                 "div",
                 null,
                 React.createElement("strong", null, "Rate-Limit Protection: "),
-                "3 concurrent workers with 60ms delay pacing"
+                "3 concurrent workers with 80ms delay pacing"
               )
             ),
             React.createElement(
@@ -3249,7 +3009,7 @@ function ReleaseListApp() {
                 {
                   className: "rl-chip active",
                   onClick: () => {
-                    refreshCatalog();
+                    refreshCatalog({ full: true });
                     setShowSettingsModal(false);
                   },
                 },

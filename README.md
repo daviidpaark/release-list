@@ -8,33 +8,34 @@ Companion to [Random Library](https://github.com/daviidpaark/random-library); bo
 
 - **Grouping Modes**
   - **Day-by-Day Timeline** (default): Releases grouped into daily sections (*Today*, *Yesterday*, day of week, or calendar date).
-  - **Day-by-Day with Type Subgroups**: Daily sections split into *Albums* and *Singles & EPs*.
-  - **By Release Type**: *Albums* first, then *Singles & EPs*, each sorted chronologically.
+  - **Day-by-Day with Type Subgroups**: Daily sections split into *Albums*, *EPs*, and *Singles*.
+  - **By Release Type**: *Albums* first, then *EPs*, then *Singles*, each sorted chronologically.
   - Order releases within groups by *Artist Name (A–Z)*, *Album Type → Artist Name*, or *Chronological*.
 - **Filters and Search**
-  - Toggle **Albums** and **Singles & EPs** on the filter bar, or set default types in Settings.
+  - Toggle **Albums**, **EPs**, and **Singles** on the filter bar, or set default types in Settings.
+  - Spotify groups EPs with singles, so a single with 4 or more tracks is classified as an EP.
   - Search by release title or artist name.
   - Range chips: *7 Days*, *14 Days*, *30 Days*, *60 Days*, *90 Days*, *All Time*, or a custom date range.
   - Sort by *Newest First* or *Oldest First*.
 - **Library Status**
-  - `✓` badge on cards and `✓ In Library` badge on list rows for releases saved in your library.
+  - `✓` badge on cards for releases saved in your library.
   - Click the badge to save or remove a release from your library.
   - **`✓ In Library`** filter chip to show only saved releases.
 - **Cards and Artwork**
   - Hover to reveal a green play button that starts playback immediately.
   - Click a card or title to open the album page; click an artist name to open the artist page.
-  - Custom colors for **Albums** and **Singles & EPs** badges, with a color picker, `#RRGGBB` input, and reset button.
-- **Display Modes**
-  - **Grid View**: Artwork cards that scale from ultra-wide displays down to compact split-screen windows.
-  - **List View**: Compact rows for scanning many releases quickly.
+  - Custom colors for **Albums**, **EPs**, and **Singles** badges, with a color picker, `#RRGGBB` input, and reset button.
+  - The grid scales from ultra-wide displays down to compact split-screen windows.
 
 ## How It Works
 
 - Catalog data is cached locally in IndexedDB (`ReleaseListDB`), so opening the app loads cached results without network requests.
 - New releases are fetched only when you press **Refresh** or trigger a resync from Settings.
+- **Refresh** sends one request per followed artist and only pages a full discography when that artist's release count has changed. **Force Full Resync** pages every discography again.
+- Releases from artists you no longer follow are removed on the next sync.
 - Sync runs with at most **3 concurrent requests** and an **80ms delay** between requests to avoid HTTP `429 Too Many Requests` errors.
 - Limit scan depth to *90 Days*, *180 Days*, *365 Days*, or *All Time* to avoid pulling entire discographies.
-- [Random Library](https://github.com/daviidpaark/random-library) reads this cache (read-only) to show release dates for your saved albums.
+- [Random Library](https://github.com/daviidpaark/random-library) reads this cache (read-only) to show release dates for your saved albums and to build its **Discover** mode.
 
 ## Settings
 
@@ -42,7 +43,7 @@ Click **⚙ Settings** in the top bar:
 
 - **General**: Default filter range, sort order, and sync history depth.
 - **Grouping & Release Types**: Grouping mode, order within groups, default release types, and release type colors.
-- **Cache & Storage**: Cached release and artist counts, last sync time, manual resync, and cache wipe.
+- **Cache & Storage**: Cached release and artist counts, last sync time, last sync run statistics (duration, requests, changed artists), manual resync, and cache wipe.
 
 ## Requirements
 
