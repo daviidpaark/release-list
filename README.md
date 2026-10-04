@@ -34,6 +34,7 @@ Companion to [Random Library](https://github.com/daviidpaark/random-library); bo
 - **Refresh** sends one request per followed artist and only pages a full discography when that artist's release count has changed. **Force Full Resync** pages every discography again.
 - Releases from artists you no longer follow are removed on the next sync.
 - Sync runs with at most **3 concurrent requests** and an **80ms delay** between requests to avoid HTTP `429 Too Many Requests` errors.
+- When Spotify does answer `429`, every worker pauses (5s, then 15s, then 30s) and the request is retried, so no artist is skipped.
 - Limit scan depth to *90 Days*, *180 Days*, *365 Days*, or *All Time* to avoid pulling entire discographies.
 - [Random Library](https://github.com/daviidpaark/random-library) reads this cache (read-only) to show release dates for your saved albums and to build its **Discover** mode.
 
@@ -43,7 +44,7 @@ Click **⚙ Settings** in the top bar:
 
 - **General**: Default filter range, sort order, and sync history depth.
 - **Grouping & Release Types**: Grouping mode, order within groups, default release types, and release type colors.
-- **Cache & Storage**: Cached release and artist counts, last sync time, last sync run statistics (duration, requests, changed artists), manual resync, and cache wipe.
+- **Cache & Storage**: Cached release and artist counts, last sync time, last sync run statistics (duration, requests, changed artists, failures and their reasons, rate-limit pauses), manual resync, and cache wipe.
 
 ## Requirements
 

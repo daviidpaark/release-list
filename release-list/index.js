@@ -801,9 +801,29 @@ async function fetchFollowedArtists() {
 
 const DISCOGRAPHY_PAGE_SIZE = 100;
 
-// One page of an artist's discography; null when the request fails after retries
+// Spotify rate limits arrive in bursts, so one 429 pauses every worker instead of only the request that hit it.
+// Each further 429 on the same request waits longer before that request gives up.
+const RATE_LIMIT_BACKOFF_MS = [5000, 15000, 30000];
+let rateLimitedUntil = 0;
+let rateLimitPauses = 0;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function isRateLimitText(text) {
+  const t = String(text || "").toLowerCase();
+  return t.includes("429") || t.includes("rate limit") || t.includes("too many requests");
+}
+
+// One page of an artist's discography; { error } with a short reason when the request fails after retries
 async function fetchDiscographyPage(artistUri, offset, retries = 2) {
-  for (let attempt = 0; attempt <= retries; attempt++) {
+  let attempt = 0;
+  let rateLimitHits = 0;
+
+  while (true) {
+    const wait = rateLimitedUntil - Date.now();
+    if (wait > 0) await sleep(wait);
+
+    let reason;
     try {
       const { data, errors } = await Spicetify.GraphQL.Request(
         {
@@ -818,46 +838,49 @@ async function fetchDiscographyPage(artistUri, offset, retries = 2) {
           limit: DISCOGRAPHY_PAGE_SIZE,
         }
       );
-      if (errors) {
-        const isRateLimit = errors.some(
-          (e) => String(e?.message || "").includes("429") || String(e?.extensions?.code || "").includes("429")
-        );
-        if (isRateLimit && attempt < retries) {
-          await new Promise((r) => setTimeout(r, (attempt + 1) * 1200));
-          continue;
-        }
-        console.warn("[ReleaseList] GraphQL errors for artist", artistUri, errors);
-        return null;
-      }
       const all = data?.artistUnion?.discography?.all;
-      const groups = all?.items || [];
-      return {
-        releases: groups.flatMap((group) => group.releases?.items || []),
-        groupCount: groups.length,
-        total: typeof all?.totalCount === "number" ? all.totalCount : null,
-      };
-    } catch (e) {
-      const errStr = String(e || "");
-      const isRateLimit =
-        errStr.includes("429") ||
-        errStr.toLowerCase().includes("rate limit") ||
-        errStr.toLowerCase().includes("too many requests");
-      if (attempt < retries) {
-        const delay = isRateLimit ? (attempt + 1) * 1500 : (attempt + 1) * 600;
-        await new Promise((r) => setTimeout(r, delay));
-        continue;
+      const rateLimited = (errors || []).some((e) => isRateLimitText(e?.message) || isRateLimitText(e?.extensions?.code));
+      // Spotify can report errors for one field and still return the discography; use it when present
+      if (all && !rateLimited) {
+        const groups = all.items || [];
+        return {
+          releases: groups.flatMap((group) => group.releases?.items || []),
+          groupCount: groups.length,
+          total: typeof all.totalCount === "number" ? all.totalCount : null,
+        };
       }
-      console.warn("[ReleaseList] Fetch artist discography error:", e);
-      return null;
+      const first = errors?.[0] || {};
+      reason = rateLimited ? "429" : String(first.message || first.extensions?.code || "empty response");
+    } catch (e) {
+      // Spotify's HttpResponseError stringifies to its name only; the status lives on the object
+      const status = e?.status ?? e?.code ?? e?.response?.status ?? "";
+      reason = [e?.name, status, e?.message].filter(Boolean).join(" ") || String(e || "request failed");
     }
+
+    if (isRateLimitText(reason)) {
+      if (rateLimitHits >= RATE_LIMIT_BACKOFF_MS.length) return { error: "rate limited (429)" };
+      const until = Date.now() + RATE_LIMIT_BACKOFF_MS[rateLimitHits++];
+      if (until > rateLimitedUntil) {
+        // Count a pause once, not once per worker caught in the same burst
+        if (rateLimitedUntil <= Date.now()) rateLimitPauses++;
+        rateLimitedUntil = until;
+      }
+      continue;
+    }
+
+    if (attempt >= retries) {
+      console.warn("[ReleaseList] Discography request failed for", artistUri, reason);
+      return { error: reason.slice(0, 100) };
+    }
+    attempt++;
+    await sleep(attempt * 600);
   }
-  return null;
 }
 
 // Paged discography; most artists fit in one request.
 // knownTotal is the release count from the last complete sync: when it still matches, nothing
 // was added or removed, so only the first page is fetched.
-// Returns { releases, total, complete, requests }, or null when the first page fails.
+// Returns { releases, total, complete, requests }, or { error } when the first page fails.
 async function fetchArtistReleasesGraphQL(artistUri, knownTotal = null, pacingDelayMs = 80) {
   const releases = [];
   let offset = 0;
@@ -867,7 +890,7 @@ async function fetchArtistReleasesGraphQL(artistUri, knownTotal = null, pacingDe
   while (true) {
     const page = await fetchDiscographyPage(artistUri, offset);
     // A failed later page keeps what was fetched, marked incomplete so the next sync retries
-    if (!page) return offset === 0 ? null : { releases, total, complete: false, requests };
+    if (page.error) return offset === 0 ? { error: page.error } : { releases, total, complete: false, requests };
 
     requests++;
     releases.push(...page.releases);
@@ -1602,6 +1625,8 @@ function ReleaseListApp() {
       const artistTotals = {};
       const startedAt = Date.now();
       const stats = { requests: 0, changed: 0, failed: 0 };
+      rateLimitPauses = 0;
+      const failures = new Map(); // reason -> { count, sample artists }
 
       // Controlled concurrency (3 workers, 80ms pacing delay) with abort capability
       const discographyArrays = await runConcurrentPool(
@@ -1610,8 +1635,12 @@ function ReleaseListApp() {
         async (artist) => {
           const knownTotal = full ? null : previousTotals[artist.uri] ?? null;
           const result = await fetchArtistReleasesGraphQL(artist.uri, knownTotal);
-          if (!result) {
+          if (result.error) {
             stats.failed++;
+            const failure = failures.get(result.error) || { reason: result.error, count: 0, sample: "" };
+            failure.count++;
+            if (failure.count <= 6) failure.sample += (failure.sample ? ", " : "") + artist.name;
+            failures.set(result.error, failure);
             // Keep the old count so a failed request does not force a full fetch next time
             if (previousTotals[artist.uri] != null) artistTotals[artist.uri] = previousTotals[artist.uri];
             return null;
@@ -1693,7 +1722,13 @@ function ReleaseListApp() {
         timestamp: now,
         artistCount: artists.length,
         artistTotals,
-        lastSync: { ...stats, seconds: Math.round((now - startedAt) / 1000), full: full || Object.keys(previousTotals).length === 0 },
+        lastSync: {
+          ...stats,
+          rateLimitPauses,
+          seconds: Math.round((now - startedAt) / 1000),
+          full: full || Object.keys(previousTotals).length === 0,
+          failReasons: [...failures.values()].sort((a, b) => b.count - a.count).slice(0, 3),
+        },
         items: allUnique,
       };
 
@@ -2974,6 +3009,7 @@ function ReleaseListApp() {
                   flexDirection: "column",
                   gap: 8,
                   fontSize: 13,
+                  userSelect: "text",
                 },
               },
               React.createElement("div", null, React.createElement("strong", null, "Storage Engine: "), "IndexedDB + In-Memory (Persistent, No 5MB Quota)"),
@@ -2985,20 +3021,29 @@ function ReleaseListApp() {
                 React.createElement("strong", null, "Last Synchronized: "),
                 cacheMeta.timestamp ? new Date(cacheMeta.timestamp).toLocaleString() : "Never"
               ),
-              cacheMeta.lastSync &&
+              React.createElement(
+                "div",
+                null,
+                React.createElement("strong", null, "Last Sync Run: "),
+                cacheMeta.lastSync
+                  ? `${cacheMeta.lastSync.full ? "full" : "incremental"}, ${cacheMeta.lastSync.seconds}s, ` +
+                      `${cacheMeta.lastSync.requests} requests, ${cacheMeta.lastSync.changed} artists changed, ` +
+                      `${cacheMeta.lastSync.failed} failed` +
+                      (cacheMeta.lastSync.rateLimitPauses ? `, ${cacheMeta.lastSync.rateLimitPauses} rate-limit pauses` : "")
+                  : "Not recorded yet (press Refresh)"
+              ),
+              (cacheMeta.lastSync?.failReasons || []).map((f) =>
                 React.createElement(
                   "div",
-                  null,
-                  React.createElement("strong", null, "Last Sync Run: "),
-                  `${cacheMeta.lastSync.full ? "full" : "incremental"}, ${cacheMeta.lastSync.seconds}s, ` +
-                    `${cacheMeta.lastSync.requests} requests, ${cacheMeta.lastSync.changed} artists changed, ` +
-                    `${cacheMeta.lastSync.failed} failed`
-                ),
+                  { key: f.reason, style: { color: "#fca5a5", paddingLeft: 12 } },
+                  `${f.count} failed: ${f.reason} (e.g. ${f.sample})`
+                )
+              ),
               React.createElement(
                 "div",
                 null,
                 React.createElement("strong", null, "Rate-Limit Protection: "),
-                "3 concurrent workers with 80ms delay pacing"
+                "3 concurrent workers with 80ms delay pacing; a 429 pauses all workers (5s, 15s, 30s)"
               )
             ),
             React.createElement(
