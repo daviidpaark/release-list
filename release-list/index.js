@@ -1128,7 +1128,7 @@ const ReleaseCard = React.memo(function ReleaseCard({ release, groupColors, isSa
             "svg",
             { width: "13", height: "13", viewBox: "0 0 16 16", fill: "currentColor" },
             React.createElement("path", {
-              d: "M13.985 2.383L5.674 12.14 1.34 7.805l1.414-1.414 2.92 2.92 6.897-8.106 1.414 1.178z",
+              d: "M15.53 2.47a.75.75 0 0 1 0 1.06L4.907 14.153.47 9.716a.75.75 0 0 1 1.06-1.06l3.377 3.376L14.47 2.47a.75.75 0 0 1 1.06 0z",
             })
           )
         ),
@@ -2263,7 +2263,7 @@ function ReleaseListApp() {
               style: { position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)" },
             },
             React.createElement("path", {
-              d: "M10 2a8 8 0 0 1 6.32 12.9l5.39 5.38-1.42 1.42-5.38-5.39A8 8 0 1 1 10 2zm0 2a6 6 0 1 0 0 12 6 6 0 0 0 0-12z",
+              d: "M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z",
             })
           ),
           searchQuery &&
@@ -2423,7 +2423,7 @@ function ReleaseListApp() {
               "svg",
               { width: "12", height: "12", viewBox: "0 0 16 16", fill: "currentColor" },
               React.createElement("path", {
-                d: "M13.985 2.383L5.674 12.14 1.34 7.805l1.414-1.414 2.92 2.92 6.897-8.106 1.414 1.178z",
+                d: "M15.53 2.47a.75.75 0 0 1 0 1.06L4.907 14.153.47 9.716a.75.75 0 0 1 1.06-1.06l3.377 3.376L14.47 2.47a.75.75 0 0 1 1.06 0z",
               })
             ),
             "In Library"
