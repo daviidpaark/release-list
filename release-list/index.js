@@ -720,7 +720,17 @@ async function pushReleasesToWeb(releases, settings, notify = false) {
     const res = await fetch(`${baseUrl}/api/releases`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ items, settings: { groupColors: settings?.groupColors, groupBy: settings?.groupBy, releasesOrder: settings?.releasesOrder } }),
+      body: JSON.stringify({
+        items,
+        settings: {
+          groupColors: settings?.groupColors,
+          groupBy: settings?.groupBy,
+          releasesOrder: settings?.releasesOrder,
+          defaultRange: settings?.defaultRange,
+          sortOrder: settings?.sortOrder,
+          allowedTypes: settings?.allowedTypes,
+        },
+      }),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     if (notify) Spicetify.showNotification?.(`Synced ${items.length} releases to the web.`);
