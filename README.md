@@ -42,7 +42,7 @@ Companion to [Random Library](https://github.com/daviidpaark/random-library); bo
 
 Click **⚙ Settings** in the top bar:
 
-- **General**: Default filter range, sort order, and sync history depth.
+- **General**: Default filter range, sort order, sync history depth, and an optional Web Sync address. With the address of a [Spicetify Library](https://github.com/daviidpaark/spicetify-library) container set, **Sync to Web Now** and **Refresh** push the release catalog to it so you can browse it from a phone.
 - **Grouping & Release Types**: Grouping mode, order within groups, default release types, and release type colors.
 - **Cache & Storage**: Cached release and artist counts, last sync time, last sync run statistics (duration, requests, changed artists, failures and their reasons, rate-limit pauses), manual resync, and cache wipe.
 

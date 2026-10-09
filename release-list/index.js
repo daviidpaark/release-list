@@ -685,6 +685,51 @@ const DEFAULT_SETTINGS = {
   allowedTypes: RELEASE_TYPES, // release types enabled
 };
 
+// Optional push of the synced catalog to a Spicetify Library container.
+// The URL is shared with Random Library, which pushes the saved albums.
+const STORAGE_WEB_SYNC_URL = "spicetify-library:url";
+
+function getWebSyncUrl() {
+  try {
+    return (localStorage.getItem(STORAGE_WEB_SYNC_URL) || "").trim().replace(/\/+$/, "");
+  } catch (e) {
+    return "";
+  }
+}
+
+// notify: report the outcome even on success (manual sync)
+async function pushReleasesToWeb(releases, settings, notify = false) {
+  const baseUrl = getWebSyncUrl();
+  if (!baseUrl || !releases?.length) {
+    if (notify) Spicetify.showNotification?.(baseUrl ? "No releases to sync yet." : "Set a Web Sync address first.", true);
+    return;
+  }
+
+  const items = releases.map((r) => ({
+    uri: r.uri,
+    name: r.title,
+    artist: r.artist?.name || "",
+    artistUri: r.artist?.uri || "",
+    imageUrl: r.imageURL || "",
+    type: r.type,
+    releaseDate: r.dateStr || "",
+    trackCount: r.trackCount || 0,
+  }));
+
+  try {
+    const res = await fetch(`${baseUrl}/api/releases`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items, settings: { groupColors: settings?.groupColors, groupBy: settings?.groupBy } }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (notify) Spicetify.showNotification?.(`Synced ${items.length} releases to the web.`);
+  } catch (err) {
+    console.warn("[ReleaseList] Web sync failed:", err);
+    Spicetify.showNotification?.(`Web sync failed: ${err.message || err}`, true);
+  }
+}
+
 function getStoredJSON(key, fallback) {
   try {
     const raw = localStorage.getItem(key);
@@ -1733,6 +1778,7 @@ function ReleaseListApp() {
       };
 
       await saveCachedCatalog(catalogObj);
+      pushReleasesToWeb(allUnique, settings);
 
       setCacheMeta({ timestamp: now, artistCount: artists.length, lastSync: catalogObj.lastSync });
       setIsCached(true);
@@ -2766,6 +2812,46 @@ function ReleaseListApp() {
                 "div",
                 { style: { fontSize: 11, color: "rgba(255,255,255,0.45)", marginTop: 4 } },
                 "Limits how far back Release List scans for releases. Keeps your local cache lean, fast, and free of ancient albums."
+              )
+            ),
+            // Web Sync
+            React.createElement(
+              "div",
+              null,
+              React.createElement("label", { style: { fontSize: 13, fontWeight: 600, display: "block", marginBottom: 6 } }, "Web Sync Address (Optional)"),
+              React.createElement("input", {
+                type: "url",
+                placeholder: "http://192.168.1.100:8081",
+                defaultValue: getWebSyncUrl(),
+                onChange: (e) => {
+                  try {
+                    localStorage.setItem(STORAGE_WEB_SYNC_URL, e.target.value.trim());
+                  } catch (err) {}
+                },
+                style: {
+                  width: "100%",
+                  padding: "8px 12px",
+                  background: "#282828",
+                  border: "1px solid rgba(255,255,255,0.15)",
+                  borderRadius: 6,
+                  color: "#fff",
+                  boxSizing: "border-box",
+                },
+              }),
+              React.createElement(
+                "button",
+                {
+                  className: "rl-chip",
+                  style: { marginTop: 8 },
+                  title: "Push the cached catalog to the web without syncing from Spotify",
+                  onClick: () => pushReleasesToWeb(releases, settings, true),
+                },
+                "Sync to Web Now"
+              ),
+              React.createElement(
+                "div",
+                { style: { fontSize: 11, color: "rgba(255,255,255,0.45)", marginTop: 4 } },
+                "Address of a Spicetify Library sync endpoint; Refresh and Sync to Web Now push the release catalog to it. Shared with Random Library."
               )
             )
           ),
