@@ -1121,6 +1121,7 @@ const ReleaseCard = React.memo(function ReleaseCard({ release, groupColors, isSa
     "div",
     {
       className: "rl-card",
+      "data-uri": release.uri,
       onClick: handleCardClick,
     },
     // Artwork container
