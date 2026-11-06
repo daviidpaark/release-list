@@ -601,6 +601,22 @@ async function fetchSavedAlbumUris() {
   return uris;
 }
 
+function onLibraryAlbumsChanged(callback) {
+  const events = Spicetify.Platform?.LibraryAPI?.getEvents?.();
+  if (typeof events?.addListener !== "function") return () => {};
+  let timer = null;
+  const handler = (event) => {
+    if (event?.data?.list && event.data.list !== "albums") return;
+    clearTimeout(timer);
+    timer = setTimeout(callback, 500);
+  };
+  events.addListener("update", handler);
+  return () => {
+    clearTimeout(timer);
+    events.removeListener("update", handler);
+  };
+}
+
 async function toggleSaveAlbum(uri, currentlySaved) {
   try {
     if (currentlySaved) {
@@ -1857,6 +1873,39 @@ function ReleaseListApp() {
     })();
     return () => {
       isMounted = false;
+    };
+  }, []);
+
+  // Follow saves and removals made anywhere in Spotify
+  useEffect(() => {
+    let active = true;
+    let running = false;
+    let rerun = false;
+    const sync = async () => {
+      if (running) {
+        rerun = true;
+        return;
+      }
+      running = true;
+      try {
+        do {
+          rerun = false;
+          const fresh = await fetchSavedAlbumUris();
+          if (!active || !fresh.size) return;
+          setSavedAlbumUris((prev) => {
+            if (prev.size === fresh.size && [...fresh].every((uri) => prev.has(uri))) return prev;
+            saveCachedSavedAlbumUris(fresh);
+            return fresh;
+          });
+        } while (rerun && active);
+      } finally {
+        running = false;
+      }
+    };
+    const unsubscribe = onLibraryAlbumsChanged(sync);
+    return () => {
+      active = false;
+      unsubscribe();
     };
   }, []);
 
