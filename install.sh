@@ -46,7 +46,7 @@ for app in "${APPS[@]}"; do
   else
     for file in index.js manifest.json; do
       echo "  Downloading $file..."
-      curl -sL "$REPO_BASE_URL/$app/$file" -o "$dest/$file"
+      curl -fsSL "$REPO_BASE_URL/$app/$file" -o "$dest/$file"
     done
     echo "  Downloaded to $dest"
   fi
