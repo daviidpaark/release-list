@@ -649,6 +649,7 @@ const STORAGE_KEYS = {
   CUSTOM_START_DATE: "release-list:custom-start-date",
   CUSTOM_END_DATE: "release-list:custom-end-date",
   SORT_ORDER: "release-list:sort-order",
+  UPCOMING_COLLAPSED: "release-list:upcoming-collapsed",
 };
 
 const DAY_MS = 86400000;
@@ -713,6 +714,25 @@ function getWebSyncUrl() {
   }
 }
 
+// "push" for the sync port, "read-only" for the public site, "unreachable" otherwise.
+// The public site refuses the CORS preflight a PUT needs but still serves reads.
+let webSyncModeCache = { url: "", mode: null };
+async function getWebSyncMode(baseUrl = getWebSyncUrl()) {
+  if (!baseUrl) return null;
+  if (webSyncModeCache.url === baseUrl && webSyncModeCache.mode) return webSyncModeCache.mode;
+  let mode = "unreachable";
+  try {
+    await fetch(`${baseUrl}/api/releases`, { method: "OPTIONS" });
+    mode = "push";
+  } catch {
+    try {
+      if ((await fetch(`${baseUrl}/api/sync/releases`)).ok) mode = "read-only";
+    } catch {}
+  }
+  if (mode !== "unreachable") webSyncModeCache = { url: baseUrl, mode };
+  return mode;
+}
+
 // notify: report the outcome even on success (manual sync)
 async function pushReleasesToWeb(releases, settings, notify = false) {
   const baseUrl = getWebSyncUrl();
@@ -720,8 +740,12 @@ async function pushReleasesToWeb(releases, settings, notify = false) {
     if (notify) Spicetify.showNotification?.(baseUrl ? "No releases to sync yet." : "Set a Web Sync address first.", true);
     return;
   }
+  if ((await getWebSyncMode(baseUrl)) === "read-only") {
+    if (notify) Spicetify.showNotification?.("This address is read-only. Pushes need the sync port address.", true);
+    return;
+  }
 
-  const items = releases.map((r) => ({
+  const toWeb = (r) => ({
     uri: r.uri,
     name: r.title,
     artist: r.artist?.name || "",
@@ -730,7 +754,9 @@ async function pushReleasesToWeb(releases, settings, notify = false) {
     type: r.type,
     releaseDate: r.dateStr || "",
     trackCount: r.trackCount || 0,
-  }));
+  });
+  const items = releases.map(toWeb);
+  const catalog = inMemoryCatalog;
 
   try {
     const res = await fetch(`${baseUrl}/api/releases`, {
@@ -746,13 +772,76 @@ async function pushReleasesToWeb(releases, settings, notify = false) {
           sortOrder: settings?.sortOrder,
           allowedTypes: settings?.allowedTypes,
         },
+        sync: {
+          artistTotals: catalog?.artistTotals || {},
+          preReleases: (catalog?.preReleases || []).map(toWeb),
+          preReleaseCheckedAt: catalog?.preReleaseCheckedAt || 0,
+        },
       }),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    // Remember the server's copy is this device's own, so it is not loaded back
+    const { syncedAt } = await res.json().catch(() => ({}));
+    if (catalog && Date.parse(syncedAt) > 0) {
+      catalog.serverSyncedAt = Date.parse(syncedAt);
+      saveCachedCatalog(catalog).catch(() => {});
+    }
     if (notify) Spicetify.showNotification?.(`Synced ${items.length} releases to the web.`);
   } catch (err) {
     console.warn("[ReleaseList] Web sync failed:", err);
-    Spicetify.showNotification?.(`Web sync failed: ${err.message || err}`, true);
+    if (notify) Spicetify.showNotification?.(`Web sync failed: ${err.message || err}`, true);
+  }
+}
+
+// Loads the catalog another device pushed when it is newer than this device's.
+// Returns the new catalog, or null when there is nothing newer.
+// canApply is checked before the catalog is replaced, so a sync that started meanwhile wins.
+async function pullCatalogFromWeb(canApply = () => true) {
+  const baseUrl = getWebSyncUrl();
+  if (!baseUrl) return null;
+  try {
+    const res = await fetch(`${baseUrl}/api/sync/releases`);
+    if (!res.ok) return null;
+    const snapshot = await res.json();
+    const syncedAt = Date.parse(snapshot?.syncedAt) || 0;
+    const local = inMemoryCatalog;
+    const localTime = Math.max(local?.serverSyncedAt || 0, local?.timestamp || 0);
+    if (!Array.isArray(snapshot.items) || !snapshot.items.length || syncedAt <= localTime) return null;
+
+    const fromWeb = (r, extra = {}) => {
+      const { time, dateStr } = parseReleaseDate(r.releaseDate);
+      return {
+        uri: r.uri,
+        id: r.uri.split(":").pop(),
+        title: r.name,
+        artist: { name: r.artist, uri: r.artistUri },
+        imageURL: r.imageUrl,
+        dateStr,
+        time,
+        type: r.type,
+        trackCount: r.trackCount || 0,
+        ...extra,
+      };
+    };
+    const sync = snapshot.sync || {};
+    const artistTotals = sync.artistTotals || {};
+    const catalog = {
+      timestamp: syncedAt,
+      serverSyncedAt: syncedAt,
+      artistCount: Object.keys(artistTotals).length || local?.artistCount || 0,
+      artistTotals,
+      lastSync: local?.lastSync,
+      loadedFromWeb: true,
+      items: snapshot.items.map((r) => fromWeb(r)).sort((a, b) => b.time - a.time),
+      preReleases: (sync.preReleases || []).map((r) => fromWeb(r, { preRelease: true })),
+      preReleaseCheckedAt: sync.preReleaseCheckedAt || 0,
+    };
+    if (!canApply()) return null;
+    await saveCachedCatalog(catalog);
+    return catalog;
+  } catch (err) {
+    console.warn("[ReleaseList] Could not load releases from the web:", err);
+    return null;
   }
 }
 
@@ -885,8 +974,10 @@ function isRateLimitText(text) {
   return t.includes("429") || t.includes("rate limit") || t.includes("too many requests");
 }
 
-// One page of an artist's discography; { error } with a short reason when the request fails after retries
-async function fetchDiscographyPage(artistUri, offset, retries = 2) {
+// GraphQL request that shares the rate-limit pause across workers.
+// pick(data) returns the result, or undefined when the response holds nothing usable.
+// Returns { value }, or { error } with a short reason when the request fails after retries.
+async function requestWithBackoff(definition, variables, pick, retries = 2) {
   let attempt = 0;
   let rateLimitHits = 0;
 
@@ -896,30 +987,11 @@ async function fetchDiscographyPage(artistUri, offset, retries = 2) {
 
     let reason;
     try {
-      const { data, errors } = await Spicetify.GraphQL.Request(
-        {
-          name: "queryArtistDiscographyAll",
-          operation: "query",
-          sha256Hash: "9380995a9d4663cbcb5113fef3c6aabf70ae6d407ba61793fd01e2a1dd6929b0",
-          value: null,
-        },
-        {
-          uri: artistUri,
-          offset,
-          limit: DISCOGRAPHY_PAGE_SIZE,
-        }
-      );
-      const all = data?.artistUnion?.discography?.all;
+      const { data, errors } = await Spicetify.GraphQL.Request(definition, variables);
       const rateLimited = (errors || []).some((e) => isRateLimitText(e?.message) || isRateLimitText(e?.extensions?.code));
-      // Spotify can report errors for one field and still return the discography; use it when present
-      if (all && !rateLimited) {
-        const groups = all.items || [];
-        return {
-          releases: groups.flatMap((group) => group.releases?.items || []),
-          groupCount: groups.length,
-          total: typeof all.totalCount === "number" ? all.totalCount : null,
-        };
-      }
+      // Spotify can report errors for one field and still return the rest; use it when present
+      const value = rateLimited ? undefined : pick(data);
+      if (value !== undefined) return { value };
       const first = errors?.[0] || {};
       reason = rateLimited ? "429" : String(first.message || first.extensions?.code || "empty response");
     } catch (e) {
@@ -940,12 +1012,82 @@ async function fetchDiscographyPage(artistUri, offset, retries = 2) {
     }
 
     if (attempt >= retries) {
-      console.warn("[ReleaseList] Discography request failed for", artistUri, reason);
+      console.warn("[ReleaseList] Request failed:", definition.name, variables?.uri, reason);
       return { error: reason.slice(0, 100) };
     }
     attempt++;
     await sleep(attempt * 600);
   }
+}
+
+// One page of an artist's discography; { error } with a short reason when the request fails after retries
+async function fetchDiscographyPage(artistUri, offset) {
+  const result = await requestWithBackoff(
+    {
+      name: "queryArtistDiscographyAll",
+      operation: "query",
+      sha256Hash: "9380995a9d4663cbcb5113fef3c6aabf70ae6d407ba61793fd01e2a1dd6929b0",
+      value: null,
+    },
+    { uri: artistUri, offset, limit: DISCOGRAPHY_PAGE_SIZE },
+    (data) => data?.artistUnion?.discography?.all || undefined
+  );
+  if (result.error) return result;
+  const all = result.value;
+  const groups = all.items || [];
+  return {
+    releases: groups.flatMap((group) => group.releases?.items || []),
+    groupCount: groups.length,
+    total: typeof all.totalCount === "number" ? all.totalCount : null,
+  };
+}
+
+// Upcoming (pre-save) releases are only on the artist overview, at most one per artist
+const PRE_RELEASE_CHECK_DAYS = 1;
+
+function largestCover(coverArt) {
+  return coverArt?.sources?.reduce((max, src) => (src.width > max.width ? src : max), { width: 0, url: "" })?.url || "";
+}
+
+// Returns { fieldSeen, raw, release } or { error }; release is null when the artist has nothing upcoming
+async function fetchArtistPreRelease(artist) {
+  const definition = Spicetify.GraphQL.Definitions?.queryArtistOverview || {
+    name: "queryArtistOverview",
+    operation: "query",
+    sha256Hash: "ae0e2958a4ab645b35ca19ac04d0495ae12d9c5d7b7286217674801a9aab281a",
+    value: null,
+  };
+  const result = await requestWithBackoff(
+    definition,
+    { uri: artist.uri, locale: "", includePrerelease: true },
+    (data) => data?.artistUnion || undefined
+  );
+  if (result.error) return result;
+
+  const union = result.value;
+  const key = Object.keys(union).find((k) => /^prerelease/i.test(k));
+  const pre = key ? union[key] : null;
+  if (!pre) return { fieldSeen: Boolean(key), raw: null, release: null };
+
+  const content = pre.preReleaseContent || pre.content || pre;
+  const uri = pre.uri || content.uri || "";
+  const rawDate = pre.releaseDate?.isoString || content.releaseDate?.isoString || content.date?.isoString || "";
+  const { time, dateStr } = parseReleaseDate(rawDate);
+  const release = uri
+    ? {
+        uri,
+        id: uri.split(":").pop(),
+        title: content.name || "Upcoming release",
+        artist: { name: artist.name, uri: artist.uri },
+        imageURL: largestCover(content.coverArt),
+        dateStr,
+        time,
+        type: normalizeType(content.type, content.tracks?.totalCount || 0) || "album",
+        trackCount: content.tracks?.totalCount || 0,
+        preRelease: true,
+      }
+    : null;
+  return { fieldSeen: true, raw: JSON.stringify(pre).slice(0, 400), release };
 }
 
 // Paged discography; most artists fit in one request.
@@ -1100,8 +1242,9 @@ const ReleaseCard = React.memo(function ReleaseCard({ release, groupColors, isSa
 
   const handleCardClick = (e) => {
     if (e.target.closest("button") || e.target.closest(".rl-action-btn-mini") || e.target.closest(".rl-in-library-badge") || e.target.closest(".rl-card-artist")) return;
+    const [, kind, id] = release.uri.split(":");
     Spicetify.Platform.History.push({
-      pathname: `/album/${release.uri.split(":").pop()}`,
+      pathname: `/${release.preRelease ? kind : "album"}/${id}`,
     });
   };
 
@@ -1160,6 +1303,7 @@ const ReleaseCard = React.memo(function ReleaseCard({ release, groupColors, isSa
           )
         ),
       // Play Button on hover
+      !release.preRelease &&
       React.createElement(
         "button",
         {
@@ -1255,7 +1399,7 @@ const ReleaseCard = React.memo(function ReleaseCard({ release, groupColors, isSa
               marginLeft: 6,
             },
           },
-          release.dateStr
+          release.preRelease ? `Out ${release.dateStr || "soon"}` : release.dateStr
         )
       )
     )
@@ -1423,11 +1567,19 @@ function ReleaseListApp() {
   const [loading, setLoading] = useState(() => !inMemoryCatalog?.items?.length);
   const [syncProgress, setSyncProgress] = useState({ current: 0, total: 0 });
   const [releases, setReleases] = useState(() => inMemoryCatalog?.items || []);
+  const [preReleases, setPreReleases] = useState(() => inMemoryCatalog?.preReleases || []);
   const [cacheMeta, setCacheMeta] = useState(() => ({
     timestamp: inMemoryCatalog?.timestamp || 0,
     artistCount: inMemoryCatalog?.artistCount || 0,
     lastSync: inMemoryCatalog?.lastSync,
+    loadedFromWeb: Boolean(inMemoryCatalog?.loadedFromWeb),
   }));
+  const [upcomingCollapsed, setUpcomingCollapsed] = useState(() => getStoredJSON(STORAGE_KEYS.UPCOMING_COLLAPSED, false));
+  const toggleUpcoming = () =>
+    setUpcomingCollapsed((prev) => {
+      setStoredJSON(STORAGE_KEYS.UPCOMING_COLLAPSED, !prev);
+      return !prev;
+    });
   const [isCached, setIsCached] = useState(() => Boolean(inMemoryCatalog?.items?.length));
 
   // Active Filters State (Persisted across navigation and app restarts)
@@ -1599,6 +1751,22 @@ function ReleaseListApp() {
   // Settings Modal State
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [settingsTab, setSettingsTab] = useState("general");
+  const [webSyncUrl, setWebSyncUrl] = useState(getWebSyncUrl);
+  const [webSyncMode, setWebSyncMode] = useState(null);
+
+  useEffect(() => {
+    if (!showSettingsModal) return;
+    let cancelled = false;
+    setWebSyncMode(null);
+    const timer = setTimeout(async () => {
+      const mode = await getWebSyncMode(webSyncUrl);
+      if (!cancelled) setWebSyncMode(mode);
+    }, 500);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [webSyncUrl, showSettingsModal]);
 
   const searchInputRef = useRef(null);
   const sentinelRef = useRef(null);
@@ -1629,6 +1797,18 @@ function ReleaseListApp() {
     });
   };
 
+  const applyCatalog = (catalog) => {
+    setReleases(catalog.items);
+    setPreReleases(catalog.preReleases || []);
+    setCacheMeta({
+      timestamp: catalog.timestamp,
+      artistCount: catalog.artistCount || 0,
+      lastSync: catalog.lastSync,
+      loadedFromWeb: Boolean(catalog.loadedFromWeb),
+    });
+    setIsCached(true);
+  };
+
   // Sync / Load Releases (Checks In-Memory & IndexedDB FIRST)
   const loadReleases = useCallback(async (forceRefresh = false) => {
     // 1. Check Persistent Cache if not forcing manual refresh
@@ -1654,17 +1834,43 @@ function ReleaseListApp() {
           saveCachedCatalog(cached).catch(() => {});
         }
 
-        setReleases(healedItems);
-        setCacheMeta({ timestamp: cached.timestamp, artistCount: cached.artistCount || 0, lastSync: cached.lastSync });
-        setIsCached(true);
+        applyCatalog({ ...cached, items: healedItems });
+        setLoading(false);
+        // Another device may have synced since; its catalog replaces this one when newer
+        pullCatalogFromWeb(() => !isSyncingRef.current).then((pulled) => pulled && applyCatalog(pulled));
+        return;
+      }
+
+      // 2. No local catalog yet: load the one another device pushed
+      const pulled = await pullCatalogFromWeb(() => !isSyncingRef.current);
+      if (pulled) {
+        applyCatalog(pulled);
         setLoading(false);
         return;
       }
     }
 
-    // 2. Otherwise run sync
+    // 3. Otherwise run sync
     await refreshCatalog();
   }, [settings.syncWindowDays]);
+
+  // A read-only Web Sync address means another device keeps the catalog current, so load its copy
+  const handleRefresh = async () => {
+    if ((await getWebSyncMode()) !== "read-only") return refreshCatalog();
+    if (isSyncingRef.current) return;
+    setLoading(true);
+    try {
+      const pulled = await pullCatalogFromWeb(() => !isSyncingRef.current);
+      if (pulled) {
+        applyCatalog(pulled);
+        Spicetify.showNotification?.(`Loaded ${pulled.items.length} releases from the web.`);
+      } else {
+        Spicetify.showNotification?.("No newer releases on the web.");
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
 
   // full: page every discography again instead of only the artists whose release count changed
   const refreshCatalog = async ({ windowDays: overrideSyncWindow = null, full = false } = {}) => {
@@ -1770,11 +1976,63 @@ function ReleaseListApp() {
         return;
       }
 
+      const discographyPauses = rateLimitPauses;
+
+      // Upcoming releases: one overview request per artist, at most once a day
+      const followedUris = new Set(artists.map((a) => a.uri));
+      let preReleases = (inMemoryCatalog?.preReleases || []).filter((r) => followedUris.has(r.artist?.uri));
+      let preReleaseCheckedAt = inMemoryCatalog?.preReleaseCheckedAt || 0;
+      let preReleaseStats = inMemoryCatalog?.lastSync?.preRelease || null;
+      if (full || Date.now() - preReleaseCheckedAt >= PRE_RELEASE_CHECK_DAYS * DAY_MS - 2 * 3600000) {
+        const preStartedAt = Date.now();
+        const pausesBefore = rateLimitPauses;
+        const preStats = { requests: 0, found: 0, fieldSeen: 0, failed: 0, failReasons: [], sample: "" };
+        const preFailures = new Map();
+        setSyncProgress({ current: 0, total: artists.length, phase: "Checking upcoming releases" });
+        const preResults = await runConcurrentPool(
+          artists,
+          3,
+          async (artist) => {
+            const result = await fetchArtistPreRelease(artist);
+            if (result.error) {
+              preStats.failed++;
+              const failure = preFailures.get(result.error) || { reason: result.error, count: 0, sample: "" };
+              failure.count++;
+              if (failure.count <= 6) failure.sample += (failure.sample ? ", " : "") + artist.name;
+              preFailures.set(result.error, failure);
+              return null;
+            }
+            preStats.requests++;
+            if (result.fieldSeen) preStats.fieldSeen++;
+            if (result.raw && !preStats.sample) preStats.sample = result.raw;
+            if (result.release) preStats.found++;
+            return result.release;
+          },
+          (done, total) => setSyncProgress({ current: done, total, phase: "Checking upcoming releases" }),
+          80,
+          () => abortSyncRef.current
+        );
+        if (abortSyncRef.current) {
+          console.log("[ReleaseList] Sync was cancelled or unmounted.");
+          return;
+        }
+        preStats.rateLimitPauses = rateLimitPauses - pausesBefore;
+        preStats.seconds = Math.round((Date.now() - preStartedAt) / 1000);
+        preStats.failReasons = [...preFailures.values()].sort((a, b) => b.count - a.count).slice(0, 3);
+        preReleaseStats = preStats;
+        // A run cut short by rate limits keeps the old list and tries again on the next sync
+        if (preStats.failed < artists.length / 2) {
+          const byUri = new Map();
+          preResults.filter(Boolean).forEach((r) => byUri.set(r.uri, r));
+          preReleases = [...byUri.values()];
+          preReleaseCheckedAt = Date.now();
+        }
+      }
+
       const flattened = discographyArrays.filter(Boolean).flat();
 
       // Deduplicate releases by URI, seeding with existing releases so partial syncs never drop catalog data.
       // Releases from artists that are no longer followed are dropped.
-      const followedUris = new Set(artists.map((a) => a.uri));
       const uniqueMap = new Map();
       if (Array.isArray(inMemoryCatalog?.items)) {
         inMemoryCatalog.items.forEach((r) => {
@@ -1796,12 +2054,15 @@ function ReleaseListApp() {
         artistTotals,
         lastSync: {
           ...stats,
-          rateLimitPauses,
+          rateLimitPauses: discographyPauses,
+          preRelease: preReleaseStats,
           seconds: Math.round((now - startedAt) / 1000),
           full: full || Object.keys(previousTotals).length === 0,
           failReasons: [...failures.values()].sort((a, b) => b.count - a.count).slice(0, 3),
         },
         items: allUnique,
+        preReleases,
+        preReleaseCheckedAt,
       };
 
       await saveCachedCatalog(catalogObj);
@@ -1810,9 +2071,11 @@ function ReleaseListApp() {
       setCacheMeta({ timestamp: now, artistCount: artists.length, lastSync: catalogObj.lastSync });
       setIsCached(true);
       setReleases(allUnique);
+      setPreReleases(preReleases);
 
       Spicetify.showNotification(
-        `Synced ${allUnique.length} releases from ${artists.length} artists in ${catalogObj.lastSync.seconds}s (${stats.requests} requests).`
+        `Synced ${allUnique.length} releases from ${artists.length} artists in ${catalogObj.lastSync.seconds}s (${stats.requests} requests).` +
+          (preReleases.length ? ` ${preReleases.length} upcoming.` : "")
       );
     } catch (err) {
       console.error("[ReleaseList] Catalog refresh error:", err);
@@ -1974,6 +2237,17 @@ function ReleaseListApp() {
 
     return result;
   }, [releases, activeTypes, onlySaved, savedAlbumUris, dateRangeDays, customStartDate, customEndDate, debouncedSearchQuery, sortOrder]);
+
+  // Upcoming releases, soonest first; the in-library filter hides them since they cannot be saved yet
+  const upcomingReleases = useMemo(() => {
+    if (onlySaved) return [];
+    const todayStart = new Date().setHours(0, 0, 0, 0);
+    const searchMatcher = createSearchMatcher(debouncedSearchQuery);
+    return preReleases
+      .filter((r) => !r.time || r.time >= todayStart)
+      .filter((r) => !debouncedSearchQuery.trim() || searchMatcher(r.title) || searchMatcher(r.artist?.name))
+      .sort((a, b) => (a.time || Infinity) - (b.time || Infinity));
+  }, [preReleases, onlySaved, debouncedSearchQuery]);
 
   const visibleItemCount = Math.min(visibleCount, filteredReleases.length);
 
@@ -2248,9 +2522,9 @@ function ReleaseListApp() {
               alignItems: "center",
               gap: "6px",
             },
-            onClick: () => refreshCatalog(),
+            onClick: handleRefresh,
             disabled: loading,
-            title: "Sync fresh releases from Spotify",
+            title: "Sync fresh releases from Spotify, or load them from a read-only Web Sync address",
           },
           React.createElement(
             "svg",
@@ -2523,7 +2797,7 @@ function ReleaseListApp() {
           "div",
           { style: { fontSize: 14, fontWeight: 600 } },
           syncProgress.total > 0
-            ? `Syncing releases from followed artists (${syncProgress.current} / ${syncProgress.total})...`
+            ? `${syncProgress.phase || "Syncing releases from followed artists"} (${syncProgress.current} / ${syncProgress.total})...`
             : "Loading releases from local cache..."
         )
       ),
@@ -2542,6 +2816,68 @@ function ReleaseListApp() {
         React.createElement("div", { style: { fontSize: 44, marginBottom: 12 } }, "📅"),
         React.createElement("h3", { style: { margin: "0 0 8px 0", color: "#fff", fontSize: 18 } }, "No releases match your filters"),
         React.createElement("p", { style: { margin: 0, fontSize: 14 } }, "Try expanding your date range, toggling more release types, or searching for a different artist.")
+      ),
+
+    // Upcoming (pre-save) releases
+    !loading && upcomingReleases.length > 0 &&
+      React.createElement(
+        "section",
+        { style: { marginBottom: 36 } },
+        React.createElement(
+          "div",
+          {
+            role: "button",
+            title: upcomingCollapsed ? "Show upcoming releases" : "Hide upcoming releases",
+            onClick: toggleUpcoming,
+            style: {
+              padding: "10px 0",
+              marginBottom: upcomingCollapsed ? 0 : 16,
+              borderBottom: "1px solid rgba(255, 255, 255, 0.08)",
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              cursor: "pointer",
+              userSelect: "none",
+            },
+          },
+          React.createElement(
+            "h2",
+            {
+              style: {
+                margin: 0,
+                fontSize: 18,
+                fontWeight: 800,
+                letterSpacing: "-0.2px",
+                color: "#ffffff",
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+              },
+            },
+            "Coming Soon",
+            React.createElement("svg", {
+              width: 14,
+              height: 14,
+              viewBox: "0 0 16 16",
+              fill: "currentColor",
+              style: { transform: upcomingCollapsed ? "none" : "rotate(90deg)", transition: "transform 0.15s" },
+              dangerouslySetInnerHTML: { __html: Spicetify.SVGIcons?.["chevron-right"] || "" },
+            })
+          ),
+          React.createElement(
+            "span",
+            { style: { fontSize: 12, color: "rgba(255, 255, 255, 0.5)", fontWeight: 600 } },
+            `${upcomingReleases.length} ${upcomingReleases.length === 1 ? "release" : "releases"}`
+          )
+        ),
+        !upcomingCollapsed &&
+        React.createElement(
+          "div",
+          { className: "rl-grid" },
+          upcomingReleases.map((release) =>
+            React.createElement(ReleaseCard, { key: release.uri, release, groupColors: settings.groupColors })
+          )
+        )
       ),
 
     // Feed Timeline / Type Sections
@@ -2882,11 +3218,15 @@ function ReleaseListApp() {
               React.createElement("input", {
                 type: "url",
                 placeholder: "http://192.168.1.100:8081",
+                autoCapitalize: "off",
+                autoCorrect: "off",
+                spellCheck: false,
                 defaultValue: getWebSyncUrl(),
                 onChange: (e) => {
                   try {
                     localStorage.setItem(STORAGE_WEB_SYNC_URL, e.target.value.trim());
                   } catch (err) {}
+                  setWebSyncUrl(getWebSyncUrl());
                 },
                 style: {
                   width: "100%",
@@ -2898,20 +3238,25 @@ function ReleaseListApp() {
                   boxSizing: "border-box",
                 },
               }),
-              React.createElement(
-                "button",
-                {
-                  className: "rl-chip",
-                  style: { marginTop: 8 },
-                  title: "Push the cached catalog to the web without syncing from Spotify",
-                  onClick: () => pushReleasesToWeb(releases, settings, true),
-                },
-                "Sync to Web Now"
-              ),
+              webSyncMode !== "read-only" &&
+                React.createElement(
+                  "button",
+                  {
+                    className: "rl-chip",
+                    style: { marginTop: 8 },
+                    title: "Push the cached catalog to the web without syncing from Spotify",
+                    onClick: () => pushReleasesToWeb(releases, settings, true),
+                  },
+                  "Sync to Web Now"
+                ),
               React.createElement(
                 "div",
                 { style: { fontSize: 11, color: "rgba(255,255,255,0.45)", marginTop: 4 } },
-                "Address of a Spicetify Library sync endpoint; Refresh and Sync to Web Now push the release catalog to it. Shared with Random Library."
+                webSyncMode === "read-only"
+                  ? "Read-only address: this device loads the release catalog from it, including on Refresh, and never pushes. Use the sync port address to push from here. Shared with Random Library."
+                  : webSyncMode === "unreachable"
+                    ? "Can't reach this address. Check that Spicetify Library is running. Shared with Random Library."
+                    : "Address of a Spicetify Library sync endpoint; Refresh and Sync to Web Now push the release catalog to it. Shared with Random Library."
               )
             )
           ),
@@ -3165,7 +3510,9 @@ function ReleaseListApp() {
                 "div",
                 null,
                 React.createElement("strong", null, "Last Synchronized: "),
-                cacheMeta.timestamp ? new Date(cacheMeta.timestamp).toLocaleString() : "Never"
+                cacheMeta.timestamp
+                  ? new Date(cacheMeta.timestamp).toLocaleString() + (cacheMeta.loadedFromWeb ? " (loaded from the web server)" : "")
+                  : "Never"
               ),
               React.createElement(
                 "div",
@@ -3178,6 +3525,33 @@ function ReleaseListApp() {
                       (cacheMeta.lastSync.rateLimitPauses ? `, ${cacheMeta.lastSync.rateLimitPauses} rate-limit pauses` : "")
                   : "Not recorded yet (press Refresh)"
               ),
+              React.createElement(
+                "div",
+                null,
+                React.createElement("strong", null, "Upcoming Check (daily): "),
+                cacheMeta.lastSync?.preRelease
+                  ? (() => {
+                      const p = cacheMeta.lastSync.preRelease;
+                      return (
+                        `${p.seconds}s, ${p.requests} requests, ${p.found} upcoming, ${p.failed} failed, ` +
+                        `${p.rateLimitPauses} rate-limit pauses, field present on ${p.fieldSeen} artists`
+                      );
+                    })()
+                  : "Not run yet (press Refresh)"
+              ),
+              (cacheMeta.lastSync?.preRelease?.failReasons || []).map((f) =>
+                React.createElement(
+                  "div",
+                  { key: "pre-" + f.reason, style: { color: "#fca5a5", paddingLeft: 12 } },
+                  `${f.count} failed: ${f.reason} (e.g. ${f.sample})`
+                )
+              ),
+              cacheMeta.lastSync?.preRelease?.sample &&
+                React.createElement(
+                  "div",
+                  { style: { paddingLeft: 12, fontFamily: "monospace", fontSize: 11, wordBreak: "break-all", opacity: 0.7 } },
+                  cacheMeta.lastSync.preRelease.sample
+                ),
               (cacheMeta.lastSync?.failReasons || []).map((f) =>
                 React.createElement(
                   "div",

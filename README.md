@@ -33,6 +33,7 @@ Companion to [Random Library](https://github.com/daviidpaark/random-library); bo
 - New releases are fetched only when you press **Refresh** or trigger a resync from Settings.
 - **Refresh** sends one request per followed artist and only pages a full discography when that artist's release count has changed. **Force Full Resync** pages every discography again.
 - Releases from artists you no longer follow are removed on the next sync.
+- The first **Refresh** each day (and every full resync) also checks each followed artist for an upcoming (pre-save) release. These show in a collapsible **Coming Soon** section above the feed; clicking one opens Spotify's countdown page, where you can pre-save it.
 - Sync runs with at most **3 concurrent requests** and an **80ms delay** between requests to avoid HTTP `429 Too Many Requests` errors.
 - When Spotify does answer `429`, every worker pauses (5s, then 15s, then 30s) and the request is retried, so no artist is skipped.
 - Limit scan depth to *90 Days*, *180 Days*, *365 Days*, or *All Time* to avoid pulling entire discographies.
@@ -42,7 +43,7 @@ Companion to [Random Library](https://github.com/daviidpaark/random-library); bo
 
 Click **⚙ Settings** in the top bar:
 
-- **General**: Default filter range, sort order, sync history depth, and an optional Web Sync address. With the address of a [Spicetify Library](https://github.com/daviidpaark/spicetify-library) container set, **Sync to Web Now** and **Refresh** push the release catalog to it so you can browse it from a phone.
+- **General**: Default filter range, sort order, sync history depth, and an optional Web Sync address. With the address of a [Spicetify Library](https://github.com/daviidpaark/spicetify-library) container set, **Sync to Web Now** and **Refresh** push the release catalog to it so you can browse it from a phone. On another computer with the same address, Release List loads that catalog whenever it is newer than its own instead of syncing again; the public read-only address works for loading. With the read-only address, **Refresh** loads the server's catalog instead of syncing from Spotify, and **Sync to Web Now** is hidden.
 - **Grouping & Release Types**: Grouping mode, order within groups, default release types, and release type colors.
 - **Cache & Storage**: Cached release and artist counts, last sync time, last sync run statistics (duration, requests, changed artists, failures and their reasons, rate-limit pauses), manual resync, and cache wipe.
 
